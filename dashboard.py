@@ -22,6 +22,27 @@ st.set_page_config(
     layout='wide',
 )
 
+# ── Translate button (injected into the parent document — st.markdown never
+# executes <script> tags, but a components.html iframe can reach window.parent) ──
+import streamlit.components.v1 as components
+components.html(
+    """
+    <script>
+    (function() {
+      var d = window.parent.document;
+      if (!d.getElementById('ff-translate-loader')) {
+        var s = d.createElement('script');
+        s.id = 'ff-translate-loader';
+        s.defer = true;
+        s.src = 'https://www.forwardforecasting.eu/assets/translate-widget.js';
+        d.body.appendChild(s);
+      }
+    })();
+    </script>
+    """,
+    height=0,
+)
+
 # ── Mobile detection via User-Agent (no JS, no iframes, works on all browsers) ──
 # st.context.headers is available server-side — no client round-trip needed.
 _ua = st.context.headers.get("User-Agent", "")
