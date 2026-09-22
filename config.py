@@ -63,3 +63,25 @@ SELL_THRESHOLD   = -0.10   # Predicted return < -X% → SELL
 ORDER_QUANTITY        = 10       # Shares per order (paper trading)
 MAX_POSITION_PCT      = 0.10     # Maximum % of portfolio per position
 FALLBACK_PORTFOLIO    = 1_000.0  # Used when IB does not return NetLiquidation
+
+# Risk management
+STOP_LOSS_PCT      = 0.08   # Close a position if it falls X% below its entry price
+TRAILING_STOP_PCT  = 0.05   # Close a position if it falls X% below its peak price since entry
+MAX_DRAWDOWN_PCT   = 0.15   # Halt new BUY orders once portfolio equity drawdown from peak exceeds X%
+RISK_STATE_FILE    = CACHE_DIR / 'risk_state.json'  # Persists entry/peak prices and equity peak across runs
+
+# Backtesting (analysis/backtest.py)
+BACKTEST_START_CAPITAL      = 10_000.0  # Simulated starting capital
+BACKTEST_TRANSACTION_COST_PCT = 0.0010  # Commission per trade (10 bps)
+BACKTEST_SLIPPAGE_PCT          = 0.0005  # Market-impact/slippage per trade (5 bps)
+BACKTEST_REBALANCE_DAYS        = PREDICTION_DAYS  # Re-score signals every N trading days
+BACKTEST_MIN_HISTORY_DAYS      = 120    # Warm-up window before the first rebalance
+BACKTEST_LOOKBACK_DAYS         = 500    # ~2 trading years actually walked (excl. warm-up) —
+                                         # fetch_prices_cached() returns the FULL cache (back
+                                         # to each ticker's IPO), so this bounds runtime; each
+                                         # rebalance fits one RandomForest per ticker
+
+# DCA simulator (dashboard "Simulator" tab)
+SIM_WEEKLY_AMOUNT_EUR = 100.0   # Fictitious amount invested every week
+SIM_YEARS             = 2       # Lookback window
+SIM_BENCHMARK_TICKER  = 'SPY'   # S&P 500 ETF proxy (tradable, unlike the ^GSPC index)

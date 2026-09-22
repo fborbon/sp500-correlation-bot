@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from config import OUTPUTS_DIR, TOP_N_HIGHLIGHT
+from config import OUTPUTS_DIR, SIM_BENCHMARK_TICKER, SIM_WEEKLY_AMOUNT_EUR, SIM_YEARS, TOP_N_HIGHLIGHT
 from reporting.html_builders import (
     _build_echarts_html, _build_table_html, _vol_norm,
     _SIGNALS_DESC, _FUND_DESC, _CACHE_SUBDIR, _CHART_START_DATE,
@@ -300,12 +300,14 @@ if not is_mobile:
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 if is_mobile:
-    _tab_labels = ['📋', '🏦', '📊', '📈', '📦', '💹', '🔗']
+    _tab_labels = ['📋', '🏦', '📊', '📈', '📦', '💹', '🔗', '🛡️', '💶']
 else:
     _tab_labels = ['📋 Signals', '🏦 Fundamentals', '📊 Mkt Cap',
-                   '📈 Prices', '📦 Volume', '💹 Returns', '🔗 Correlation']
+                   '📈 Prices', '📦 Volume', '💹 Returns', '🔗 Correlation',
+                   '🛡️ Backtest', '💶 Simulator']
 
-tab_signals, tab_fund, tab_mcap, tab_prices, tab_volume, tab_returns, tab_corr = st.tabs(_tab_labels)
+(tab_signals, tab_fund, tab_mcap, tab_prices, tab_volume, tab_returns, tab_corr,
+ tab_backtest, tab_sim) = st.tabs(_tab_labels)
 
 
 # ── Tab 1: Signals ────────────────────────────────────────────────────────────
@@ -764,6 +766,142 @@ with tab_corr:
                         y1_label='Normalized (base=100)', y2_label='Close price ($)')
                 else:
                     st.info('Select at least one company above to display the chart.')
+
+# ── Tab: Backtest ─────────────────────────────────────────────────────────────
+with tab_backtest:
+    backtest_dir = OUTPUTS_DIR / 'backtest_latest'
+    metrics_path = backtest_dir / 'metrics.json'
+    equity_path  = backtest_dir / 'equity_curve.csv'
+    trades_path  = backtest_dir / 'trades.csv'
+
+    if not metrics_path.exists() or not equity_path.exists():
+        st.info(
+            'No backtest results yet. Run `python main.py backtest <n_tickers>` on the '
+            'server to walk-forward test the strategy (net of commissions, slippage, '
+            'stop-loss/trailing-stop and max-drawdown rules) and populate this tab.'
+        )
+    else:
+        with open(metrics_path) as f:
+            bt_metrics = json.load(f)
+        equity_df = _load_csv(str(equity_path), index_col=0, parse_dates=True)
+        trades_df = _load_csv(str(trades_path)) if trades_path.exists() else pd.DataFrame()
+
+        if not is_mobile:
+            st.subheader('🛡️ Strategy Backtest')
+            st.caption(
+                'Walk-forward replay of the correlation/Random-Forest strategy — at each '
+                'rebalance only price history available up to that day is used (no lookahead). '
+                'Commissions, slippage, stop-loss, trailing-stop and the max-drawdown circuit '
+                'breaker are all applied, same as live trading.'
+            )
+
+        vs_bench = bt_metrics['total_return_pct'] - bt_metrics['benchmark_return_pct']
+        if is_mobile:
+            _kpi_row([
+                ('Return', f"{bt_metrics['total_return_pct']:+.1f}%"),
+                ('CAGR', f"{bt_metrics['cagr_pct']:+.1f}%"),
+                ('Sharpe', f"{bt_metrics['sharpe_ratio']:.2f}"),
+            ])
+            _kpi_row([
+                ('Max DD', f"{bt_metrics['max_drawdown_pct']:.1f}%"),
+                ('Win rate', f"{bt_metrics['win_rate_pct']:.0f}%"),
+                ('Trades', bt_metrics['num_trades']),
+            ])
+        else:
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric('Total Return', f"{bt_metrics['total_return_pct']:+.1f}%")
+            c2.metric('CAGR', f"{bt_metrics['cagr_pct']:+.1f}%")
+            c3.metric('Sharpe Ratio', f"{bt_metrics['sharpe_ratio']:.2f}")
+            c4.metric('Max Drawdown', f"{bt_metrics['max_drawdown_pct']:.1f}%")
+            c5.metric('vs Buy&Hold', f"{vs_bench:+.1f} pp")
+
+        st.divider()
+
+        st.markdown('##### Equity Curve — Strategy vs Buy & Hold')
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=equity_df.index, y=equity_df['equity'],
+                                 name='Strategy', line=dict(color='#2ca02c', width=2)))
+        fig.add_trace(go.Scatter(x=equity_df.index, y=equity_df['benchmark_equity'],
+                                 name='Buy & Hold (same universe)',
+                                 line=dict(color='#888', width=1.5, dash='dot')))
+        fig.update_layout(
+            yaxis_title='Portfolio value ($)', height=400,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation='h', yanchor='bottom', y=1.0, x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        if not trades_df.empty:
+            st.caption(f"{bt_metrics['num_trades']} simulated fills · "
+                       f"win rate {bt_metrics['win_rate_pct']:.0f}% on closed trades")
+            st.dataframe(trades_df.tail(50).iloc[::-1], height=320, use_container_width=True)
+
+# ── Tab: Simulator (weekly DCA) ─────────────────────────────────────────────
+with tab_sim:
+    if not is_mobile:
+        st.subheader('💶 Weekly DCA Simulator')
+        st.caption(
+            'Illustrative only, no fees modelled: what would a fixed weekly EUR '
+            'contribution into an S&P 500 ETF have grown to?'
+        )
+
+    sc1, sc2 = st.columns(2)
+    sim_weekly = sc1.number_input('Weekly contribution (€)', min_value=10.0, max_value=1000.0,
+                                  value=float(SIM_WEEKLY_AMOUNT_EUR), step=10.0)
+    sim_years = sc2.slider('Years', min_value=1, max_value=10, value=int(SIM_YEARS))
+
+    @st.cache_data(ttl=3600, show_spinner='Fetching S&P 500 + EUR/USD history…')
+    def _run_dca_simulation(ticker: str, weekly_amount: float, years: int):
+        from analysis.simulator import simulate_weekly_dca
+        result = simulate_weekly_dca(ticker=ticker, weekly_amount_eur=weekly_amount, years=years)
+        return result['curve'], result['metrics']
+
+    try:
+        sim_curve, sim_metrics = _run_dca_simulation(SIM_BENCHMARK_TICKER, sim_weekly, sim_years)
+    except Exception as e:
+        st.error(f'Could not fetch simulation data: {e}')
+        sim_curve, sim_metrics = None, None
+
+    if sim_metrics:
+        if is_mobile:
+            _kpi_row([
+                ('Invested', f"€{sim_metrics['total_invested_eur']:,.0f}"),
+                ('Value', f"€{sim_metrics['final_value_eur']:,.0f}"),
+                ('Return', f"{sim_metrics['total_return_pct']:+.1f}%"),
+            ])
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric('Total Invested', f"€{sim_metrics['total_invested_eur']:,.0f}",
+                      help=f"{sim_metrics['num_contributions']} weekly contributions")
+            c2.metric('Current Value', f"€{sim_metrics['final_value_eur']:,.0f}")
+            c3.metric('Profit / Loss', f"€{sim_metrics['profit_eur']:+,.0f}")
+            c4.metric('Return (CAGR)',
+                     f"{sim_metrics['total_return_pct']:+.1f}% ({sim_metrics['cagr_pct']:+.1f}%/yr)")
+
+        st.divider()
+
+        st.markdown(f'##### €{sim_weekly:.0f}/week into {SIM_BENCHMARK_TICKER} over {sim_years} years')
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=sim_curve.index, y=sim_curve['invested_eur'],
+            name='Total invested (€)', fill='tozeroy',
+            line=dict(color='#888', width=1), fillcolor='rgba(136,136,136,0.15)',
+        ))
+        fig.add_trace(go.Scatter(
+            x=sim_curve.index, y=sim_curve['value_eur'],
+            name='Portfolio value (€)', line=dict(color='#1f77b4', width=2.5),
+        ))
+        fig.update_layout(
+            yaxis_title='€', height=400,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation='h', yanchor='bottom', y=1.0, x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            f"{sim_metrics['num_contributions']} contributions of €{sim_weekly:.0f} into "
+            f"{SIM_BENCHMARK_TICKER} (S&P 500 ETF), converted at the EUR/USD rate on each date. "
+            'No fees, spread or tax are modelled.'
+        )
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 try:

@@ -1,11 +1,13 @@
 import warnings
 warnings.filterwarnings('ignore')
 
-from config import MIN_R2, OUTPUTS_DIR, TOP_N_HIGHLIGHT, create_run_dirs
+from config import MAX_DRAWDOWN_PCT, MIN_R2, OUTPUTS_DIR, TOP_N_HIGHLIGHT, create_run_dirs
 from broker.connection import connect_ib
 from broker.data import (fetch_prices, fetch_prices_free, fetch_prices_cached,
                          fetch_volume_free, fetch_volume_cached)
-from broker.orders import calculate_position_size, execute_order, get_portfolio_value
+from broker.orders import calculate_position_size, close_position, execute_order, get_portfolio_value
+from broker.risk import (check_max_drawdown, check_stop_losses, load_risk_state,
+                         register_entry, remove_position, save_risk_state)
 from analysis.universe import fetch_company_metadata, fetch_market_caps_cached, get_sp500_tickers
 from analysis.fundamentals import fetch_fundamentals, score_fundamentals, save_fundamentals_csv
 from analysis.correlations import compute_correlations, get_top_correlated_pairs, get_top_inverse_pairs
@@ -152,22 +154,82 @@ def run_bot(execute_trades: bool = False, save_plots: bool = True,
     print("\nExecute trades in IBKR")
     if execute_trades:
         ib = connect_ib()
+        risk_state = load_risk_state()
         try:
+            current_prices = prices_df.iloc[-1].to_dict()
+
+            print("\nChecking stop-loss / trailing-stop on open positions...")
+            for ticker, reason in check_stop_losses(risk_state, current_prices):
+                print(f"  ✗ {reason} hit on {ticker} @ ${current_prices[ticker]:.2f} — closing position")
+                close_position(ib, ticker)
+                remove_position(risk_state, ticker)
+
             portfolio_value = get_portfolio_value(ib)
+            halted = check_max_drawdown(risk_state, portfolio_value)
+            if halted:
+                print(f"\n  ⚠ Max drawdown ({MAX_DRAWDOWN_PCT:.0%}) breached — "
+                      f"new BUY orders halted this run. SELL/stop-loss closes still apply.")
+
             print(f"\nPlacing orders (portfolio: ${portfolio_value:,.0f})...")
             actionable = signals_df[signals_df['signal'].isin(['BUY', 'SELL'])]
             for _, row in actionable.iterrows():
                 if row['model_r2'] < MIN_R2:
                     continue
+                if row['signal'] == 'BUY' and halted:
+                    continue
+
                 strength = min(1.0, row['model_r2'])
                 qty = calculate_position_size(portfolio_value, row['current_price'], strength)
                 execute_order(ib, row['ticker'], row['signal'], qty)
+
+                if row['signal'] == 'BUY':
+                    register_entry(risk_state, row['ticker'], row['current_price'], qty)
+                else:
+                    remove_position(risk_state, row['ticker'])
         finally:
+            save_risk_state(risk_state)
             ib.disconnect()
             print("\n✓ Disconnected from Interactive Brokers.")
     else:
         print("\n  ℹ Simulation mode — no orders placed.")
         print("    To execute on paper trading: run_bot(execute_trades=True)")
+
+
+def run_backtest_cli(n_tickers: int = 20) -> None:
+    """Walk-forward backtest of the live strategy, net of commissions/slippage.
+
+    Reuses whatever is already in cache/prices_cache.parquet (populated by any
+    prior `signals`/`paper`/`live` run) — run `python main.py signals` first if
+    the cache is empty.
+    """
+    import json
+    from analysis.backtest import run_backtest
+    from config import BACKTEST_LOOKBACK_DAYS, BACKTEST_MIN_HISTORY_DAYS
+
+    print(f"\nBacktest — top {n_tickers} tickers by market cap")
+    tickers, _ = get_sp500_tickers(n=n_tickers)
+    prices_df = fetch_prices_cached(tickers)
+    if prices_df.empty:
+        print("✗ No cached price data. Run `python main.py signals <n>` first to populate the cache.")
+        return
+
+    # fetch_prices_cached() returns the FULL cache (back to each ticker's IPO) — bound the
+    # walk to BACKTEST_LOOKBACK_DAYS (+warm-up) so runtime stays practical.
+    prices_df = prices_df.tail(BACKTEST_LOOKBACK_DAYS + BACKTEST_MIN_HISTORY_DAYS)
+
+    result = run_backtest(prices_df, n_tickers=n_tickers)
+    metrics = result['metrics']
+
+    print("\n=== Backtest results ===")
+    for k, v in metrics.items():
+        print(f"  {k:<24} {v}")
+
+    out_dir = OUTPUTS_DIR / 'backtest_latest'
+    out_dir.mkdir(exist_ok=True)
+    result['equity_curve'].to_csv(out_dir / 'equity_curve.csv')
+    result['trades'].to_csv(out_dir / 'trades.csv', index=False)
+    (out_dir / 'metrics.json').write_text(json.dumps(metrics, indent=2))
+    print(f"\n✓ Saved to {out_dir}")
 
 
 if __name__ == '__main__':
@@ -198,5 +260,8 @@ if __name__ == '__main__':
     elif mode == 'signals':
         run_bot(execute_trades=False, n_tickers=n)
 
+    elif mode == 'backtest':
+        run_backtest_cli(n_tickers=n if isinstance(n, int) else 20)
+
     else:
-        print("Usage: python main.py [demo|paper|live|signals] [n_tickers]")
+        print("Usage: python main.py [demo|paper|live|signals|backtest] [n_tickers]")

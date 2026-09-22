@@ -1,6 +1,6 @@
 # SP500 Correlation Bot
 
-Algorithmic trading bot for Interactive Brokers that predicts short-term 7-day price movements using Pearson correlations across the full S&P 500 universe. Both direct and inverse correlations are used as features for a Random Forest model, with the universe size configurable at runtime to always select the **N most valuable** companies by market cap. Price data is fetched free from Yahoo Finance; Interactive Brokers is only connected when live order placement is enabled. A Streamlit dashboard visualises signals, fundamentals, correlation heatmaps, and cumulative returns after each run.
+Algorithmic trading bot for Interactive Brokers that predicts short-term 7-day price movements using Pearson correlations across the full S&P 500 universe. Both direct and inverse correlations are used as features for a Random Forest model, with the universe size configurable at runtime to always select the **N most valuable** companies by market cap. Price data is fetched free from Yahoo Finance; Interactive Brokers is only connected when live order placement is enabled. Every position is protected by a stop-loss / trailing-stop, and a portfolio-level max-drawdown circuit breaker halts new buys if losses accumulate — the strategy itself is validated by a walk-forward backtester that charges realistic commissions and slippage before any of this touches real money. A Streamlit dashboard visualises signals, fundamentals, correlation heatmaps, the backtest equity curve, and a weekly DCA simulator after each run.
 
 **Main technologies:** Python · scikit-learn (Random Forest) · pandas · yfinance · ib-insync (Interactive Brokers API) · Streamlit · Plotly · pyarrow
 
@@ -20,10 +20,13 @@ Algorithmic trading bot for Interactive Brokers that predicts short-term 7-day p
 8. [Key Configuration (`config.py`)](#key-configuration-configpy)
 9. [Selecting Companies](#selecting-companies)
 10. [Position Sizing](#position-sizing)
-11. [Inverse Correlation Logic](#inverse-correlation-logic)
-12. [Output Plots (`save_plots=True`)](#output-plots-saveplotstrue)
-13. [Auditing](#auditing)
-14. [CI/CD](#cicd)
+11. [Risk Management](#risk-management)
+12. [Backtesting](#backtesting)
+13. [Weekly DCA Simulator](#weekly-dca-simulator)
+14. [Inverse Correlation Logic](#inverse-correlation-logic)
+15. [Output Plots (`save_plots=True`)](#output-plots-saveplotstrue)
+16. [Auditing](#auditing)
+17. [CI/CD](#cicd)
 
 ---
 
@@ -81,6 +84,9 @@ python main.py paper
 
 # Live trading — real money, requires manual confirmation
 python main.py live 50
+
+# Walk-forward backtest — top 20 tickers, net of commissions/slippage
+python main.py backtest 20
 ```
 
 Or use `Main.ipynb` in Jupyter — set `n_tickers` and `mode` in the run cell.
@@ -93,11 +99,12 @@ After running the bot, launch the dashboard to explore results interactively:
 streamlit run dashboard.py
 ```
 
-Opens in your browser at `http://localhost:8501`. Four tabs:
+Opens in your browser at `http://localhost:8501`. Nine tabs:
 - **Signals** — colour-coded BUY/SELL/HOLD table
 - **Fundamentals** — 10-metric scoring table with likelihood_pct highlighted
-- **Price Series & Market Cap** — all charts from `General/`
-- **Correlation Analysis** — heatmap + per-ticker prediction charts
+- **Mkt Cap / Prices / Volume / Returns / Correlation** — all charts from `General/` and `Correlation_method/`
+- **Backtest** — walk-forward equity curve vs buy-and-hold, from the latest `python main.py backtest` run
+- **Simulator** — weekly DCA calculator (fixed EUR amount into an S&P 500 ETF over N years)
 
 ---
 
@@ -304,7 +311,9 @@ V3/
 │   ├── __init__.py
 │   ├── connection.py       # connect_ib(), get_contract(), nest_asyncio fix
 │   ├── data.py             # fetch_prices() via IB; fetch_prices_free() via yfinance
-│   └── orders.py           # execute_order(), close_position(), calculate_position_size()
+│   ├── orders.py           # execute_order(), close_position(), calculate_position_size()
+│   └── risk.py             # stop-loss / trailing-stop / max-drawdown guard,
+│                           # persisted to cache/risk_state.json
 │
 ├── analysis/
 │   ├── __init__.py
@@ -316,8 +325,12 @@ V3/
 │   │                       # save_fundamentals_csv() — 10-metric scoring → likelihood_pct
 │   ├── model.py            # predict_price() — RandomForestRegressor + TimeSeriesSplit;
 │   │                       # returns corr_signs, y_actual, y_predicted
-│   └── signals.py          # generate_signals() — BUY/SELL/HOLD with
-│                           # direct_top5_predictors / inverse_top5_predictors
+│   ├── signals.py          # generate_signals() — BUY/SELL/HOLD with
+│   │                       # direct_top5_predictors / inverse_top5_predictors
+│   ├── backtest.py         # run_backtest() — walk-forward, no-lookahead replay with
+│   │                       # commissions/slippage + the same risk.py rules
+│   └── simulator.py        # simulate_weekly_dca() — weekly EUR→ETF DCA calculator
+│                           # for the dashboard's Simulator tab
 │
 ├── reporting/
 │   ├── __init__.py
@@ -329,7 +342,8 @@ V3/
 ├── cache/                  # Local data cache — git-ignored contents
 │   ├── prices_cache.parquet
 │   ├── volume_cache.parquet
-│   └── market_caps_cache.json
+│   ├── market_caps_cache.json
+│   └── risk_state.json     # entry/peak prices + equity peak, written by broker/risk.py
 │
 ├── outputs/                # Generated files — git-ignored contents
 │   ├── 2026-05-07_14-30/   # timestamped folder per run (YYYY-MM-DD_HH-MM)
@@ -349,6 +363,10 @@ V3/
 │   │   └── Correlation_method/
 │   │       ├── correlation_matrix.png
 │   │       └── analysis_{TICKER}.png
+│   ├── backtest_latest/    # written by `python main.py backtest` — read by the dashboard
+│   │   ├── equity_curve.csv
+│   │   ├── trades.csv
+│   │   └── metrics.json
 │   └── demo_signals.csv    # demo mode outputs (no timestamp)
 │
 ├── Main.ipynb              # Jupyter entry point
@@ -375,6 +393,16 @@ V3/
 | `FALLBACK_TICKERS` | top 20 | Used when all online sources fail |
 | `PRICE_CACHE_OVERLAP_DAYS` | `15` | Calendar days re-fetched on incremental update (for adjustments) |
 | `MCAP_CACHE_MAX_AGE_HOURS` | `24` | Hours before market-cap snapshot is considered stale |
+| `STOP_LOSS_PCT` | `0.08` | Close a position 8% below its entry price |
+| `TRAILING_STOP_PCT` | `0.05` | Close a position 5% below its peak price since entry |
+| `MAX_DRAWDOWN_PCT` | `0.15` | Halt new BUY orders once equity drawdown from peak exceeds 15% |
+| `BACKTEST_START_CAPITAL` | `10000.0` | Simulated starting capital for `python main.py backtest` |
+| `BACKTEST_TRANSACTION_COST_PCT` | `0.0010` | Commission per simulated fill (10 bps) |
+| `BACKTEST_SLIPPAGE_PCT` | `0.0005` | Slippage per simulated fill (5 bps) |
+| `BACKTEST_REBALANCE_DAYS` | `7` | Trading days between backtest re-scoring points |
+| `SIM_WEEKLY_AMOUNT_EUR` | `100.0` | Default weekly contribution in the DCA Simulator tab |
+| `SIM_YEARS` | `2` | Default lookback window in the DCA Simulator tab |
+| `SIM_BENCHMARK_TICKER` | `SPY` | ETF used as the S&P 500 proxy in the DCA Simulator |
 
 ---
 
@@ -415,6 +443,55 @@ quantity  = int(3,000 / 300)      = 10 shares
 ```
 
 To change the spend amount, adjust `MAX_POSITION_PCT` or `FALLBACK_PORTFOLIO` in `config.py`.
+
+---
+
+## Risk Management
+
+Position sizing alone does not stop a loss from running — it only caps the size of the initial bet. `broker/risk.py` adds three independent guards, all evaluated at the start of every trading run (`execute_trades=True`) before any new order is placed:
+
+| Guard | Config | Behaviour |
+|---|---|---|
+| **Stop-loss** | `STOP_LOSS_PCT = 0.08` | Closes a position if its price falls 8% below the recorded entry price. |
+| **Trailing stop** | `TRAILING_STOP_PCT = 0.05` | Closes a position if its price falls 5% below the highest price observed since entry — locks in gains on winners instead of only protecting against losses. |
+| **Max drawdown (circuit breaker)** | `MAX_DRAWDOWN_PCT = 0.15` | If portfolio equity has fallen 15% from its all-time run peak, **new BUY orders are halted for that run** (SELL orders and stop-loss closes still execute — de-risking is never blocked). |
+
+Entry price, peak price, and the portfolio equity peak are persisted to `cache/risk_state.json` between runs (each cron invocation is a fresh process). The flow inside `main.py`'s `execute_trades` block is:
+
+1. Load `risk_state.json`.
+2. Check every open position's current price against its stop-loss / trailing-stop; close any breach immediately.
+3. Recompute portfolio value, update the equity peak, and evaluate the drawdown circuit breaker.
+4. Walk the BUY/SELL signal table — BUY orders are skipped entirely if the circuit breaker is active; every filled BUY registers its entry price for future stop-loss checks.
+5. Save `risk_state.json`.
+
+---
+
+## Backtesting
+
+`analysis/backtest.py` answers the question the live pipeline can't: *would this strategy actually have made money, net of costs?* It replays history day by day rather than fitting once on "all data up to today":
+
+- At every rebalance point (`BACKTEST_REBALANCE_DAYS = PREDICTION_DAYS`, i.e. weekly) the model is fit and scored using **only price history available up to that day** — no lookahead into the future.
+- Every simulated fill pays `BACKTEST_TRANSACTION_COST_PCT` (10 bps commission) and `BACKTEST_SLIPPAGE_PCT` (5 bps slippage), applied against the strategy, not in its favour.
+- The same stop-loss, trailing-stop, and max-drawdown rules from [Risk Management](#risk-management) run inside the simulation, so the backtest tests the whole system, not just the raw model.
+- Positions are fully liquidated and rebuilt at each rebalance from the fresh signal set; an equal-weight buy-and-hold of the same universe is tracked in parallel as the benchmark.
+
+Run it with:
+```bash
+python main.py backtest 20   # top 20 tickers by market cap
+```
+
+Output (`outputs/backtest_latest/`):
+- `equity_curve.csv` — daily strategy equity vs. the buy-and-hold benchmark
+- `trades.csv` — every simulated fill with reason (`SIGNAL` / `STOP_LOSS` / `TRAILING_STOP` / `REBALANCE`) and P&L
+- `metrics.json` — total return, CAGR, Sharpe ratio, max drawdown, win rate, trade count, benchmark return
+
+The dashboard's **Backtest** tab reads these files directly. `fetch_prices_cached()` returns each ticker's full history back to its IPO, so the walked window is capped by `BACKTEST_LOOKBACK_DAYS` (default ~2 trading years, plus a `BACKTEST_MIN_HISTORY_DAYS` warm-up) to keep runtime bounded — without this cap a `python main.py backtest` run would try to replay 60+ years of history. Even bounded, this is compute-heavy: each rebalance fits one Random Forest (+ 3 walk-forward CV folds) *per ticker*, so the default 2-year/20-ticker run takes on the order of 20–40 minutes depending on the host. This is an offline analysis tool meant to be run occasionally (e.g. after a config change) and left to finish in the background — not part of the live trading path, and not something the dashboard triggers on page load. Pass a smaller `n_tickers` for a quicker check.
+
+---
+
+## Weekly DCA Simulator
+
+The dashboard's **Simulator** tab is a separate, much simpler tool: not a backtest of the bot's own signals, but a plain dollar-cost-averaging calculator — *"what if I had just invested a fixed amount every week?"* It simulates contributing `SIM_WEEKLY_AMOUNT_EUR` (default €100) every week into `SIM_BENCHMARK_TICKER` (default `SPY`, the tradable S&P 500 ETF proxy) over `SIM_YEARS` (default 2), converting each contribution at that week's historical EUR/USD rate (`analysis/simulator.py`, via `yfinance`). No fees, spread, or tax are modelled — it exists purely as an always-available, honest baseline to compare the bot's own performance against passive investing, and is adjustable live from the tab (weekly amount, years) without touching `config.py`.
 
 ---
 
@@ -464,8 +541,8 @@ This section provides a structured checklist for review by an IT expert and a qu
 - **Cybersecurity** — Interactive Brokers credentials are managed by TWS/Gateway locally; no API keys are stored in the project. Live trading requires an explicit manual confirmation step. All data sources (Yahoo Finance, Wikipedia, IB) are accessed over standard HTTPS/local socket connections.
 - **Readability & maintainability** — All constants are centralized in `config.py`. The walk-forward cross-validation rationale and each model hyperparameter are documented. The signal generation logic is compact and auditable.
 - **AI / ML model adequacy** — Random Forest with `TimeSeriesSplit` is sound for this task. `MIN_R2=0.01` is a very permissive confidence threshold that may generate signals from models with near-zero predictive power. Pearson correlation assumes linear relationships; non-linear cross-stock dependencies are not captured at the predictor selection stage.
-- **Financial risk** — Live trading operates with real money. No stop-loss, trailing-stop, or maximum drawdown mechanism is documented. `MAX_POSITION_PCT=0.10` limits per-position concentration but multiple correlated BUY signals could create sector concentration. Correlation-based strategies historically break down during market dislocations (e.g., credit crises, flash crashes).
-- **Other** — Wikipedia HTML scraping for S&P 500 constituents is fragile; a format change could break the entire universe-selection stage. yfinance data quality and availability are not guaranteed and should not be the sole data source for live trading decisions. No backtesting framework is present to validate signals against historical periods.
+- **Financial risk** — Live trading operates with real money. [Stop-loss, trailing-stop, and a portfolio max-drawdown circuit breaker](#risk-management) are now enforced on every run (`broker/risk.py`), and the strategy is validated net of commissions/slippage by a [walk-forward backtester](#backtesting) before being trusted live. `MAX_POSITION_PCT=0.10` limits per-position concentration, but multiple correlated BUY signals can still create sector concentration — the drawdown circuit breaker is the backstop for that scenario, not a substitute for diversification. Correlation-based strategies historically break down during market dislocations (e.g., credit crises, flash crashes); the backtest's 2024–2026 window does not include a crisis period, so the max-drawdown guard remains the primary defense against a genuine regime break.
+- **Other** — Wikipedia HTML scraping for S&P 500 constituents is fragile; a format change could break the entire universe-selection stage. yfinance data quality and availability are not guaranteed and should not be the sole data source for live trading decisions.
 
 ### Summary Table
 
