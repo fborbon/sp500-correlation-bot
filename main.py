@@ -204,7 +204,7 @@ def run_backtest_cli(n_tickers: int = 20) -> None:
     """
     import json
     from analysis.backtest import run_backtest
-    from config import BACKTEST_LOOKBACK_DAYS, BACKTEST_MIN_HISTORY_DAYS
+    from config import BACKTEST_LOOKBACK_DAYS, BACKTEST_MIN_HISTORY_DAYS, CACHE_DIR
 
     print(f"\nBacktest — top {n_tickers} tickers by market cap")
     tickers, _ = get_sp500_tickers(n=n_tickers)
@@ -224,8 +224,8 @@ def run_backtest_cli(n_tickers: int = 20) -> None:
     for k, v in metrics.items():
         print(f"  {k:<24} {v}")
 
-    out_dir = OUTPUTS_DIR / 'backtest_latest'
-    out_dir.mkdir(exist_ok=True)
+    out_dir = CACHE_DIR / 'backtest_latest'
+    out_dir.mkdir(parents=True, exist_ok=True)
     result['equity_curve'].to_csv(out_dir / 'equity_curve.csv')
     result['trades'].to_csv(out_dir / 'trades.csv', index=False)
     (out_dir / 'metrics.json').write_text(json.dumps(metrics, indent=2))

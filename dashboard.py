@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from config import OUTPUTS_DIR, SIM_BENCHMARK_TICKER, SIM_WEEKLY_AMOUNT_EUR, SIM_YEARS, TOP_N_HIGHLIGHT
+from config import CACHE_DIR, OUTPUTS_DIR, SIM_BENCHMARK_TICKER, SIM_WEEKLY_AMOUNT_EUR, SIM_YEARS, TOP_N_HIGHLIGHT
 from reporting.html_builders import (
     _build_echarts_html, _build_table_html, _vol_norm,
     _SIGNALS_DESC, _FUND_DESC, _CACHE_SUBDIR, _CHART_START_DATE,
@@ -769,7 +769,7 @@ with tab_corr:
 
 # ── Tab: Backtest ─────────────────────────────────────────────────────────────
 with tab_backtest:
-    backtest_dir = OUTPUTS_DIR / 'backtest_latest'
+    backtest_dir = CACHE_DIR / 'backtest_latest'
     metrics_path = backtest_dir / 'metrics.json'
     equity_path  = backtest_dir / 'equity_curve.csv'
     trades_path  = backtest_dir / 'trades.csv'

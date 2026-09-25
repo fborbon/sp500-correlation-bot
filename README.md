@@ -343,7 +343,11 @@ V3/
 │   ├── prices_cache.parquet
 │   ├── volume_cache.parquet
 │   ├── market_caps_cache.json
-│   └── risk_state.json     # entry/peak prices + equity peak, written by broker/risk.py
+│   ├── risk_state.json     # entry/peak prices + equity peak, written by broker/risk.py
+│   └── backtest_latest/    # written by `python main.py backtest` — read by the dashboard
+│       ├── equity_curve.csv
+│       ├── trades.csv
+│       └── metrics.json
 │
 ├── outputs/                # Generated files — git-ignored contents
 │   ├── 2026-05-07_14-30/   # timestamped folder per run (YYYY-MM-DD_HH-MM)
@@ -363,10 +367,6 @@ V3/
 │   │   └── Correlation_method/
 │   │       ├── correlation_matrix.png
 │   │       └── analysis_{TICKER}.png
-│   ├── backtest_latest/    # written by `python main.py backtest` — read by the dashboard
-│   │   ├── equity_curve.csv
-│   │   ├── trades.csv
-│   │   └── metrics.json
 │   └── demo_signals.csv    # demo mode outputs (no timestamp)
 │
 ├── Main.ipynb              # Jupyter entry point
@@ -480,7 +480,7 @@ Run it with:
 python main.py backtest 20   # top 20 tickers by market cap
 ```
 
-Output (`outputs/backtest_latest/`):
+Output (`cache/backtest_latest/` — deliberately not under `outputs/`, where the dashboard treats the newest folder as the latest run and the daily cron deletes all but the newest):
 - `equity_curve.csv` — daily strategy equity vs. the buy-and-hold benchmark
 - `trades.csv` — every simulated fill with reason (`SIGNAL` / `STOP_LOSS` / `TRAILING_STOP` / `REBALANCE`) and P&L
 - `metrics.json` — total return, CAGR, Sharpe ratio, max drawdown, win rate, trade count, benchmark return
