@@ -290,6 +290,7 @@ if __name__ == '__main__':
     mode   = sys.argv[1] if len(sys.argv) > 1 else 'demo'
     _n_arg = sys.argv[2] if len(sys.argv) > 2 else None
     n      = (_n_arg if _n_arg == 'FALLBACK_TICKERS'
+               else None if _n_arg == 'full'
                else int(_n_arg) if _n_arg is not None
                else config.N_TICKERS)
 
