@@ -195,6 +195,18 @@ def run_bot(execute_trades: bool = False, save_plots: bool = True,
         print("    To execute on paper trading: run_bot(execute_trades=True)")
 
 
+def _load_backtest_prices(n_tickers) -> "pd.DataFrame":
+    from config import BACKTEST_LOOKBACK_DAYS, BACKTEST_MIN_HISTORY_DAYS
+
+    tickers, _ = get_sp500_tickers(n=n_tickers)
+    prices_df = fetch_prices_cached(tickers)
+    if prices_df.empty:
+        return prices_df
+    # fetch_prices_cached() returns the FULL cache (back to each ticker's IPO) — bound the
+    # walk to BACKTEST_LOOKBACK_DAYS (+warm-up) so runtime stays practical.
+    return prices_df.tail(BACKTEST_LOOKBACK_DAYS + BACKTEST_MIN_HISTORY_DAYS)
+
+
 def run_backtest_cli(n_tickers: int = 20) -> None:
     """Walk-forward backtest of the live strategy, net of commissions/slippage.
 
@@ -204,18 +216,14 @@ def run_backtest_cli(n_tickers: int = 20) -> None:
     """
     import json
     from analysis.backtest import run_backtest
-    from config import BACKTEST_LOOKBACK_DAYS, BACKTEST_MIN_HISTORY_DAYS, CACHE_DIR
+    from config import CACHE_DIR
 
-    print(f"\nBacktest — top {n_tickers} tickers by market cap")
-    tickers, _ = get_sp500_tickers(n=n_tickers)
-    prices_df = fetch_prices_cached(tickers)
+    label = 'full S&P 500 universe (~502 tickers)' if n_tickers is None else f'top {n_tickers} tickers'
+    print(f"\nBacktest — {label} by market cap")
+    prices_df = _load_backtest_prices(n_tickers)
     if prices_df.empty:
         print("✗ No cached price data. Run `python main.py signals <n>` first to populate the cache.")
         return
-
-    # fetch_prices_cached() returns the FULL cache (back to each ticker's IPO) — bound the
-    # walk to BACKTEST_LOOKBACK_DAYS (+warm-up) so runtime stays practical.
-    prices_df = prices_df.tail(BACKTEST_LOOKBACK_DAYS + BACKTEST_MIN_HISTORY_DAYS)
 
     result = run_backtest(prices_df, n_tickers=n_tickers)
     metrics = result['metrics']
@@ -230,6 +238,48 @@ def run_backtest_cli(n_tickers: int = 20) -> None:
     result['trades'].to_csv(out_dir / 'trades.csv', index=False)
     (out_dir / 'metrics.json').write_text(json.dumps(metrics, indent=2))
     print(f"\n✓ Saved to {out_dir}")
+
+
+def run_sweep_cli(n_tickers: int = 20, min_r2_values: list = None) -> None:
+    """Score the universe ONCE, then compare several MIN_R2 thresholds against
+    those same signals (cheap — no re-fitting). Writes cache/backtest_sweep/
+    (summary.csv + the raw signal history, so more thresholds can be tried
+    later without recomputing anything) and refreshes cache/backtest_latest/
+    with the config.MIN_R2 result, so the dashboard's Backtest tab reflects
+    this run too.
+    """
+    import json
+    from analysis.backtest import run_min_r2_sweep
+    from config import CACHE_DIR, MIN_R2
+
+    if min_r2_values is not None and MIN_R2 not in min_r2_values:
+        min_r2_values = sorted(set(min_r2_values) | {MIN_R2})
+
+    label = 'full S&P 500 universe (~502 tickers)' if n_tickers is None else f'top {n_tickers} tickers'
+    print(f"\nMIN_R2 sweep — {label} by market cap")
+    prices_df = _load_backtest_prices(n_tickers)
+    if prices_df.empty:
+        print("✗ No cached price data. Run `python main.py signals <n>` first to populate the cache.")
+        return
+
+    sweep = run_min_r2_sweep(prices_df, n_tickers=n_tickers, min_r2_values=min_r2_values)
+
+    print("\n=== MIN_R2 sweep summary ===")
+    print(sweep['summary'].to_string(index=False))
+
+    out_dir = CACHE_DIR / 'backtest_sweep'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sweep['summary'].to_csv(out_dir / 'summary.csv', index=False)
+    sweep['signal_df'].to_csv(out_dir / 'signal_history.csv', index=False)
+    print(f"\n✓ Sweep saved to {out_dir}")
+
+    standard = sweep['results'][MIN_R2]
+    latest_dir = CACHE_DIR / 'backtest_latest'
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    standard['equity_curve'].to_csv(latest_dir / 'equity_curve.csv')
+    standard['trades'].to_csv(latest_dir / 'trades.csv', index=False)
+    (latest_dir / 'metrics.json').write_text(json.dumps(standard['metrics'], indent=2))
+    print(f"✓ Dashboard Backtest tab refreshed with the MIN_R2={MIN_R2} result")
 
 
 if __name__ == '__main__':
@@ -261,7 +311,12 @@ if __name__ == '__main__':
         run_bot(execute_trades=False, n_tickers=n)
 
     elif mode == 'backtest':
-        run_backtest_cli(n_tickers=n if isinstance(n, int) else 20)
+        bt_n = None if _n_arg == 'full' else (n if isinstance(n, int) else 20)
+        run_backtest_cli(n_tickers=bt_n)
+
+    elif mode == 'sweep':
+        sw_n = None if _n_arg == 'full' else (n if isinstance(n, int) else 20)
+        run_sweep_cli(n_tickers=sw_n)
 
     else:
-        print("Usage: python main.py [demo|paper|live|signals|backtest] [n_tickers]")
+        print("Usage: python main.py [demo|paper|live|signals|backtest|sweep] [n_tickers|full]")

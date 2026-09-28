@@ -87,6 +87,9 @@ python main.py live 50
 
 # Walk-forward backtest — top 20 tickers, net of commissions/slippage
 python main.py backtest 20
+
+# MIN_R2 sensitivity sweep on the full universe — one expensive pass, cheap sweep
+python main.py sweep full
 ```
 
 Or use `Main.ipynb` in Jupyter — set `n_tickers` and `mode` in the run cell.
@@ -477,7 +480,8 @@ Entry price, peak price, and the portfolio equity peak are persisted to `cache/r
 
 Run it with:
 ```bash
-python main.py backtest 20   # top 20 tickers by market cap
+python main.py backtest 20     # top 20 tickers by market cap
+python main.py backtest full   # full ~502-ticker universe — several hours; see below
 ```
 
 Output (`cache/backtest_latest/` — deliberately not under `outputs/`, where the dashboard treats the newest folder as the latest run and the daily cron deletes all but the newest):
@@ -485,7 +489,27 @@ Output (`cache/backtest_latest/` — deliberately not under `outputs/`, where th
 - `trades.csv` — every simulated fill with reason (`SIGNAL` / `STOP_LOSS` / `TRAILING_STOP` / `REBALANCE`) and P&L
 - `metrics.json` — total return, CAGR, Sharpe ratio, max drawdown, win rate, trade count, benchmark return
 
-The dashboard's **Backtest** tab reads these files directly. `fetch_prices_cached()` returns each ticker's full history back to its IPO, so the walked window is capped by `BACKTEST_LOOKBACK_DAYS` (default ~2 trading years, plus a `BACKTEST_MIN_HISTORY_DAYS` warm-up) to keep runtime bounded — without this cap a `python main.py backtest` run would try to replay 60+ years of history. Even bounded, this is compute-heavy: each rebalance fits one Random Forest (+ 3 walk-forward CV folds) *per ticker*, so the default 2-year/20-ticker run takes on the order of 20–40 minutes depending on the host. This is an offline analysis tool meant to be run occasionally (e.g. after a config change) and left to finish in the background — not part of the live trading path, and not something the dashboard triggers on page load. Pass a smaller `n_tickers` for a quicker check.
+The dashboard's **Backtest** tab reads these files directly. `fetch_prices_cached()` returns each ticker's full history back to its IPO, so the walked window is capped by `BACKTEST_LOOKBACK_DAYS` (default ~2 trading years, plus a `BACKTEST_MIN_HISTORY_DAYS` warm-up) to keep runtime bounded — without this cap a `python main.py backtest` run would try to replay 60+ years of history. Even bounded, this is compute-heavy: each rebalance fits one Random Forest (+ 3 walk-forward CV folds) *per ticker*, so a 2-year run takes roughly 1–2 seconds per ticker per rebalance — about 20–40 minutes for 20 tickers, and several hours for the full ~502-ticker universe (deliberately not the default; you have to type `full`). This is an offline analysis tool meant to be run occasionally (e.g. after a config change) and left to finish in the background on the server — not part of the live trading path, and not something the dashboard triggers on page load.
+
+### MIN_R2 sweep
+
+Walk-forward R² on a next-week-return regression is very often negative — the model explains less variance than a flat forecast would — so `MIN_R2 = 0.01` can end up blocking *every* signal on a given universe, which is exactly what a real ~502-ticker/2-year run produced: 0 trades in 72 rebalances while a naive buy-and-hold of the same universe returned +167%. Re-running the whole backtest once per candidate `MIN_R2` value would multiply an already multi-hour job, so `analysis/backtest.py` splits the work in two:
+
+- `compute_signal_history()` — the expensive step, one Random Forest (+3 CV folds) per ticker per rebalance, run **once**.
+- `simulate_from_signals()` — the cheap step, replaying rebalance/stop-loss/drawdown logic against those cached signals for a single `MIN_R2` value; runs in well under a second regardless of universe size.
+
+`run_min_r2_sweep()` calls the expensive step once and the cheap step once per candidate threshold, so comparing a dozen `MIN_R2` values costs almost nothing extra over a single backtest. It also prints the R² distribution among tickers that already cleared `BUY_THRESHOLD` — the range `MIN_R2` actually has to work with — which is usually far below 0 (individual tickers scoring R² as low as −1.2 are common).
+
+```bash
+python main.py sweep 20     # top 20 tickers
+python main.py sweep full   # full universe — pays the expensive step once, sweeps for free
+```
+
+Output (`cache/backtest_sweep/`):
+- `summary.csv` — one row per `MIN_R2` candidate: trades, return, CAGR, Sharpe, max drawdown, win rate, benchmark return
+- `signal_history.csv` — the raw `(date, ticker, pred_return, r2)` history, so *additional* thresholds can be tried later by calling `simulate_from_signals()` directly on this file, without recomputing anything
+
+`run_sweep_cli()` also refreshes `cache/backtest_latest/` with the `config.MIN_R2` result from the same signal pass, so the dashboard's Backtest tab reflects the sweep run too.
 
 ---
 

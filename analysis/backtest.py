@@ -8,6 +8,14 @@ slippage, and the same stop-loss / trailing-stop / max-drawdown rules used in
 production (broker/risk.py) are applied to every simulated fill, so the
 resulting equity curve reflects net-of-cost, out-of-sample performance rather
 than an in-sample fit that looks better than it would trade.
+
+The expensive step — fitting one Random Forest (+3 walk-forward CV folds) per
+ticker at every rebalance date — is separated from the cheap step of turning
+those (predicted_return, r2) pairs into trades under a given MIN_R2/
+BUY_THRESHOLD. This lets many threshold combinations be compared (see
+run_min_r2_sweep) without re-fitting anything: compute_signal_history() runs
+once, simulate_from_signals() replays the same signals in milliseconds per
+threshold.
 """
 import numpy as np
 import pandas as pd
@@ -26,43 +34,76 @@ def _fill_price(price: float, side: str) -> float:
     return price + slip if side == 'BUY' else price - slip
 
 
-def run_backtest(prices_df: pd.DataFrame, n_tickers: int = 20,
-                 start_capital: float = None, verbose: bool = True) -> dict:
-    """Backtest the strategy over the history already present in `prices_df`.
-
-    Args:
-        prices_df:     Close-price DataFrame (date index, one column per ticker),
-                        e.g. loaded from cache/prices_cache.parquet. Columns should
-                        already be ordered by market-cap rank (as universe.py does).
-        n_tickers:      Universe size. Kept modest by default — each rebalance fits
-                        one Random Forest (+3 CV folds) per ticker, so cost scales
-                        linearly with this.
-        start_capital:  Overrides config.BACKTEST_START_CAPITAL.
-
-    Returns:
-        {'equity_curve': DataFrame[date -> equity, benchmark_equity],
-         'trades': DataFrame, 'metrics': dict}
-    """
-    capital = start_capital if start_capital is not None else BACKTEST_START_CAPITAL
-
+def _prep_universe(prices_df: pd.DataFrame, n_tickers: int):
     universe = prices_df.columns[:n_tickers].tolist() if n_tickers else list(prices_df.columns)
     prices = prices_df[universe].dropna(axis=1, how='any')
     universe = prices.columns.tolist()
     dates = prices.index
-
     if len(dates) <= BACKTEST_MIN_HISTORY_DAYS + BACKTEST_REBALANCE_DAYS:
         raise ValueError(
             f"Not enough price history ({len(dates)} rows) for a backtest — need at least "
             f"{BACKTEST_MIN_HISTORY_DAYS + BACKTEST_REBALANCE_DAYS} trading days."
         )
+    return universe, prices, dates
+
+
+def compute_signal_history(prices_df: pd.DataFrame, n_tickers: int = 20,
+                           verbose: bool = True) -> tuple:
+    """Walk forward once, scoring every ticker at every rebalance date.
+
+    This is the expensive step: one RandomForestRegressor fit (+3 CV-fold fits)
+    per ticker per rebalance, using only price history up to (and including)
+    that day — no lookahead. Runtime scales linearly with n_tickers and with
+    the number of rebalance points (history length / BACKTEST_REBALANCE_DAYS).
+
+    Returns (universe, prices, signal_df) where signal_df has one row per
+    (date, ticker) with columns ['pred_return', 'r2'] — everything a strategy
+    needs to decide BUY/SELL, without touching the model again.
+    """
+    universe, prices, dates = _prep_universe(prices_df, n_tickers)
+    rebalance_pts = list(range(BACKTEST_MIN_HISTORY_DAYS, len(dates), BACKTEST_REBALANCE_DAYS))
+
+    rows = []
+    for k, i in enumerate(rebalance_pts, 1):
+        today = dates[i]
+        hist_prices = prices.iloc[:i + 1]
+        corr_matrix, returns = compute_correlations(hist_prices)
+
+        for ticker in universe:
+            pred_ret, r2, *_ = predict_price(ticker, returns, corr_matrix)
+            rows.append({'date': today, 'ticker': ticker, 'pred_return': pred_ret, 'r2': r2})
+
+        if verbose:
+            print(f"  [{k}/{len(rebalance_pts)}] {today.date()}  scored {len(universe)} tickers",
+                  flush=True)
+
+    signal_df = pd.DataFrame(rows)
+    return universe, prices, signal_df
+
+
+def simulate_from_signals(universe: list, prices: pd.DataFrame, signal_df: pd.DataFrame,
+                          min_r2: float = None, buy_threshold: float = None,
+                          start_capital: float = None) -> dict:
+    """Cheap step: replay stop-loss/trailing-stop/rebalance/max-drawdown logic
+    against precomputed signals for one MIN_R2 threshold. No model fitting —
+    just filtering signal_df and bookkeeping, so this runs in well under a
+    second even for hundreds of tickers, letting many thresholds be compared
+    from a single compute_signal_history() pass.
+    """
+    min_r2 = MIN_R2 if min_r2 is None else min_r2
+    buy_threshold = BUY_THRESHOLD if buy_threshold is None else buy_threshold
+    capital = start_capital if start_capital is not None else BACKTEST_START_CAPITAL
+    dates = prices.index
+
+    sig = signal_df.set_index(['date', 'ticker'])[['pred_return', 'r2']]
+    rebalance_dates = set(signal_df['date'].unique())
 
     cash = capital
-    positions = {}         # ticker -> {'qty', 'entry_price', 'peak_price'}
+    positions = {}
     equity_curve = []
     trades = []
     portfolio_peak = capital
     halted = False
-    rebalance_idxs = set(range(BACKTEST_MIN_HISTORY_DAYS, len(dates), BACKTEST_REBALANCE_DAYS))
 
     for i in range(BACKTEST_MIN_HISTORY_DAYS, len(dates)):
         today = dates[i]
@@ -87,11 +128,8 @@ def run_backtest(prices_df: pd.DataFrame, n_tickers: int = 20,
                                'qty': pos['qty'], 'price': fill, 'pnl': pnl})
                 del positions[ticker]
 
-        # 2. Rebalance — re-score every ticker using ONLY data up to `today`
-        if i in rebalance_idxs:
-            hist_prices = prices.iloc[:i + 1]
-            corr_matrix, returns = compute_correlations(hist_prices)
-
+        # 2. Rebalance — apply the threshold to the precomputed signals for `today`
+        if today in rebalance_dates:
             for ticker, pos in list(positions.items()):
                 price = today_prices.get(ticker)
                 if price is None or np.isnan(price):
@@ -109,14 +147,13 @@ def run_backtest(prices_df: pd.DataFrame, n_tickers: int = 20,
             drawdown = (portfolio_peak - equity_now) / portfolio_peak if portfolio_peak > 0 else 0.0
             halted = drawdown >= MAX_DRAWDOWN_PCT
 
-            if verbose:
-                status = ' [HALTED — drawdown limit]' if halted else ''
-                print(f"  {today.date()}  equity=${equity_now:,.0f}{status}")
-
             if not halted:
                 for ticker in universe:
-                    pred_ret, r2, *_ = predict_price(ticker, returns, corr_matrix)
-                    if pred_ret is None or r2 < MIN_R2 or pred_ret <= BUY_THRESHOLD:
+                    key = (today, ticker)
+                    if key not in sig.index:
+                        continue
+                    pred_ret, r2 = sig.loc[key]
+                    if pred_ret is None or pd.isna(pred_ret) or r2 < min_r2 or pred_ret <= buy_threshold:
                         continue
 
                     price = today_prices.get(ticker)
@@ -159,8 +196,72 @@ def run_backtest(prices_df: pd.DataFrame, n_tickers: int = 20,
 
     trades_df = pd.DataFrame(trades)
     metrics = _compute_metrics(equity_df, trades_df, capital)
+    metrics['min_r2'] = min_r2
 
     return {'equity_curve': equity_df, 'trades': trades_df, 'metrics': metrics}
+
+
+def run_backtest(prices_df: pd.DataFrame, n_tickers: int = 20, start_capital: float = None,
+                 verbose: bool = True, min_r2: float = None) -> dict:
+    """Single-threshold backtest — thin wrapper kept for backward compatibility
+    (dashboard's Backtest tab and `python main.py backtest` both use this).
+    For comparing several MIN_R2 values without re-fitting, use
+    run_min_r2_sweep() instead.
+    """
+    universe, prices, signal_df = compute_signal_history(prices_df, n_tickers, verbose)
+    return simulate_from_signals(universe, prices, signal_df, min_r2=min_r2, start_capital=start_capital)
+
+
+def run_min_r2_sweep(prices_df: pd.DataFrame, n_tickers: int = 20,
+                     min_r2_values: list = None, start_capital: float = None,
+                     verbose: bool = True) -> dict:
+    """Score every ticker/rebalance ONCE, then cheaply evaluate several MIN_R2
+    thresholds against those same signals — answers "where is the confidence
+    gate actually selective?" without paying the fitting cost N times.
+
+    Returns {'summary': DataFrame (one row per min_r2, all metrics),
+             'results': {min_r2: run_backtest()-shaped dict},
+             'signal_df': the raw (date, ticker, pred_return, r2) history —
+                          save this to re-sweep additional thresholds later
+                          without recomputing anything.}
+    """
+    if min_r2_values is None:
+        # Walk-forward R² on daily-return regressions is very often negative (the
+        # model explaining less variance than a flat mean forecast) — a realistic
+        # sweep has to reach well below 0 to find where the gate actually opens up.
+        min_r2_values = [-2.0, -1.0, -0.5, -0.2, -0.1, -0.05, -0.02, 0.0, 0.01, 0.05, 0.1, 0.2]
+
+    universe, prices, signal_df = compute_signal_history(prices_df, n_tickers, verbose)
+
+    valid = signal_df.dropna(subset=['pred_return'])
+    buy_candidates = valid[valid['pred_return'] > BUY_THRESHOLD]
+    if verbose:
+        print(f"\n  {len(valid)} scored (ticker, rebalance) pairs; "
+              f"{len(buy_candidates)} cleared BUY_THRESHOLD ({BUY_THRESHOLD:+.1%}) "
+              f"before any R² filter.")
+        if len(buy_candidates):
+            q = buy_candidates['r2'].quantile([0, .1, .25, .5, .75, .9, 1.0])
+            print("  R² distribution among those candidates (this is the range MIN_R2 "
+                  "actually has to work with):")
+            for p, v in q.items():
+                print(f"    p{int(p*100):>3}: {v:+.3f}")
+
+    rows = []
+    results = {}
+    for r2_val in min_r2_values:
+        res = simulate_from_signals(universe, prices, signal_df, min_r2=r2_val,
+                                    start_capital=start_capital)
+        results[r2_val] = res
+        rows.append({'min_r2': r2_val, **res['metrics']})
+        if verbose:
+            m = res['metrics']
+            print(f"  MIN_R2={r2_val:+.2f}  trades={m['num_trades']:>4}  "
+                  f"return={m['total_return_pct']:+8.2f}%  sharpe={m['sharpe_ratio']:+6.2f}  "
+                  f"maxDD={m['max_drawdown_pct']:7.2f}%  win_rate={m['win_rate_pct']:5.1f}%  "
+                  f"vs_bh={m['benchmark_return_pct']:+8.2f}%", flush=True)
+
+    summary_df = pd.DataFrame(rows)
+    return {'summary': summary_df, 'results': results, 'signal_df': signal_df}
 
 
 def _compute_metrics(equity_df: pd.DataFrame, trades_df: pd.DataFrame, capital: float) -> dict:
