@@ -2,6 +2,10 @@ services:
   dashboard:
     build: .
     restart: always
+    mem_limit: 900m   # caps the blast radius on the shared host — if this container
+                      # leaks memory again, the kernel/docker kill it alone (restart:
+                      # always brings it back) instead of risking an OOM kill on one
+                      # of the other live services sharing this EC2 instance
     ports:
       - "127.0.0.1:8501:8501"   # only exposed to Nginx, not public
     volumes:

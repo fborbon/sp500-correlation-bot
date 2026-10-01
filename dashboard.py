@@ -4,6 +4,7 @@ Run with:  streamlit run dashboard.py --server.headless true
 """
 import base64
 import json
+import os
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -151,9 +152,28 @@ def _render_cached(run_dir, name: str, height: int) -> bool:
     return False
 
 
-@st.cache_data
-def _load_csv(path, **kwargs):
+@st.cache_data(ttl=86400, max_entries=8)
+def _read_csv_cached(path: str, mtime: float, **kwargs):
+    # `mtime` deliberately has no leading underscore: Streamlit excludes
+    # underscore-prefixed params from the cache key (meant for unhashable
+    # objects like DB connections), which would silently defeat the whole
+    # point of keying on it.
     return pd.read_csv(path, **kwargs)
+
+
+def _load_csv(path, **kwargs):
+    """Cached CSV read, keyed on (path, mtime) so a file overwritten in place
+    (e.g. cache/backtest_latest/ after a new backtest run) invalidates instead
+    of serving stale data forever, and bounded (ttl + max_entries) so a
+    long-running process doesn't accumulate one cached DataFrame per day
+    indefinitely — this previously grew unbounded and contributed to an OOM
+    kill of this container on the shared host (2026-10-01).
+    """
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    return _read_csv_cached(path, mtime, **kwargs)
 
 
 def _dual_scroll_table(df, row_styles=None, height=520, link_cols=None,
