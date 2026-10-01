@@ -48,20 +48,36 @@ def _prep_universe(prices_df: pd.DataFrame, n_tickers: int):
 
 
 def compute_signal_history(prices_df: pd.DataFrame, n_tickers: int = 20,
-                           verbose: bool = True) -> tuple:
+                           verbose: bool = True, lookahead: int = None,
+                           rebalance_days: int = None) -> tuple:
     """Walk forward once, scoring every ticker at every rebalance date.
 
     This is the expensive step: one RandomForestRegressor fit (+3 CV-fold fits)
     per ticker per rebalance, using only price history up to (and including)
     that day — no lookahead. Runtime scales linearly with n_tickers and with
-    the number of rebalance points (history length / BACKTEST_REBALANCE_DAYS).
+    the number of rebalance points (history length / rebalance_days).
+
+    Args:
+        lookahead:      Prediction horizon in trading days, passed straight to
+                        predict_price(). Defaults to config.PREDICTION_DAYS (7).
+                        Academic cross-sectional return prediction (e.g. Gu,
+                        Kelly & Xiu) studies monthly horizons — short horizons
+                        like 7 days sit at the noisiest end of the signal-to-
+                        noise spectrum, so this is exposed to test longer ones.
+        rebalance_days: How often to re-score and rebuild positions. Defaults
+                        to `lookahead` if given (so positions are held exactly
+                        as long as the prediction horizon they're based on —
+                        rebalancing weekly against a 21-day forecast would
+                        close positions before the predicted move has time to
+                        happen), else config.BACKTEST_REBALANCE_DAYS.
 
     Returns (universe, prices, signal_df) where signal_df has one row per
     (date, ticker) with columns ['pred_return', 'r2'] — everything a strategy
     needs to decide BUY/SELL, without touching the model again.
     """
     universe, prices, dates = _prep_universe(prices_df, n_tickers)
-    rebalance_pts = list(range(BACKTEST_MIN_HISTORY_DAYS, len(dates), BACKTEST_REBALANCE_DAYS))
+    rebalance_days = rebalance_days or lookahead or BACKTEST_REBALANCE_DAYS
+    rebalance_pts = list(range(BACKTEST_MIN_HISTORY_DAYS, len(dates), rebalance_days))
 
     rows = []
     for k, i in enumerate(rebalance_pts, 1):
@@ -70,12 +86,50 @@ def compute_signal_history(prices_df: pd.DataFrame, n_tickers: int = 20,
         corr_matrix, returns = compute_correlations(hist_prices)
 
         for ticker in universe:
-            pred_ret, r2, *_ = predict_price(ticker, returns, corr_matrix)
+            pred_ret, r2, *_ = predict_price(ticker, returns, corr_matrix, lookahead=lookahead)
             rows.append({'date': today, 'ticker': ticker, 'pred_return': pred_ret, 'r2': r2})
 
         if verbose:
             print(f"  [{k}/{len(rebalance_pts)}] {today.date()}  scored {len(universe)} tickers",
                   flush=True)
+
+    signal_df = pd.DataFrame(rows)
+    return universe, prices, signal_df
+
+
+def compute_momentum_signal(prices_df: pd.DataFrame, n_tickers: int = 20,
+                            lookback: int = 90, skip: int = 5,
+                            rebalance_days: int = None, verbose: bool = True) -> tuple:
+    """Pure price-based momentum benchmark — no model fitting at all.
+
+    Standard factor-investing momentum: rank by trailing return over `lookback`
+    days, skipping the most recent `skip` days (short-term reversal filter).
+    Classic equity momentum uses a 252-day lookback / 21-day skip (~12mo minus
+    the most recent month); scaled down here (90/5) to fit inside the same
+    BACKTEST_MIN_HISTORY_DAYS warm-up window used for the RF strategy, so both
+    can be compared on identical rebalance dates.
+
+    Returns the same (universe, prices, signal_df) shape as
+    compute_signal_history() — with 'r2' fixed at 1.0 (unused by
+    simulate_ranked_from_signals, which never scales size by it) — so it can
+    be run through the exact same simulator as the RF-based strategy.
+    """
+    universe, prices, dates = _prep_universe(prices_df, n_tickers)
+    rebalance_days = rebalance_days or BACKTEST_REBALANCE_DAYS
+    rebalance_pts = list(range(BACKTEST_MIN_HISTORY_DAYS, len(dates), rebalance_days))
+
+    rows = []
+    for k, i in enumerate(rebalance_pts, 1):
+        today = dates[i]
+        start_px = prices.iloc[i - lookback - skip]
+        end_px   = prices.iloc[i - skip]
+        momentum = (end_px / start_px) - 1
+        for ticker in universe:
+            rows.append({'date': today, 'ticker': ticker,
+                        'pred_return': float(momentum[ticker]), 'r2': 1.0})
+        if verbose:
+            print(f"  [{k}/{len(rebalance_pts)}] {today.date()}  momentum scored "
+                  f"{len(universe)} tickers", flush=True)
 
     signal_df = pd.DataFrame(rows)
     return universe, prices, signal_df
@@ -197,6 +251,140 @@ def simulate_from_signals(universe: list, prices: pd.DataFrame, signal_df: pd.Da
     trades_df = pd.DataFrame(trades)
     metrics = _compute_metrics(equity_df, trades_df, capital)
     metrics['min_r2'] = min_r2
+
+    return {'equity_curve': equity_df, 'trades': trades_df, 'metrics': metrics}
+
+
+def simulate_ranked_from_signals(universe: list, prices: pd.DataFrame, signal_df: pd.DataFrame,
+                                 top_n: int = 10, min_r2: float = None,
+                                 require_positive: bool = True,
+                                 start_capital: float = None) -> dict:
+    """Rank-based, equal-weight strategy — the methodology used in the academic
+    literature (e.g. Gu, Kelly & Xiu decile-sort predicted returns and trade the
+    top decile) rather than an absolute BUY_THRESHOLD cutoff.
+
+    Two deliberate departures from simulate_from_signals(), both motivated by
+    findings from the MIN_R2 sweep on this project's own data:
+      - Selection is by RANK (top `top_n` predicted returns each rebalance),
+        not by whether the raw predicted magnitude clears a fixed bar — the
+        sweep showed predicted-return magnitude is ~uncorrelated with R² or
+        outcome quality, so a magnitude cutoff filters for noise, not against it.
+      - Sizing is FLAT equal-weight across the selected names, not scaled by
+        `min(1.0, r2)` — with r2 typically in [-1, 0.1], that formula produces
+        qty=0 (no trade at all) for nearly every real r2 value at realistic
+        share prices, and goes negative (silently skipped, but via a position-
+        sizing accident, not an intentional risk decision) whenever r2 < 0. R2
+        isn't a calibrated edge estimate, so using it to size bets is sizing by
+        noise dressed up as confidence.
+
+    `min_r2` is still available as an optional floor (None = no R² filter at
+    all, since R² has already been shown to barely track anything); it exists
+    to test whether even a token quality floor changes results.
+    """
+    capital = start_capital if start_capital is not None else BACKTEST_START_CAPITAL
+    dates = prices.index
+
+    sig = signal_df.set_index(['date', 'ticker'])[['pred_return', 'r2']]
+    rebalance_dates = set(signal_df['date'].unique())
+
+    cash = capital
+    positions = {}
+    equity_curve = []
+    trades = []
+    portfolio_peak = capital
+    halted = False
+
+    for i in range(BACKTEST_MIN_HISTORY_DAYS, len(dates)):
+        today = dates[i]
+        today_prices = prices.iloc[i]
+
+        # 1. Daily stop-loss / trailing-stop check on open positions
+        for ticker in list(positions.keys()):
+            price = today_prices.get(ticker)
+            if price is None or np.isnan(price):
+                continue
+            pos = positions[ticker]
+            pos['peak_price'] = max(pos['peak_price'], price)
+            hard_stop = price <= pos['entry_price'] * (1 - STOP_LOSS_PCT)
+            trailing  = price <= pos['peak_price']  * (1 - TRAILING_STOP_PCT)
+            if hard_stop or trailing:
+                fill = _fill_price(price, 'SELL')
+                proceeds = fill * pos['qty'] * (1 - BACKTEST_TRANSACTION_COST_PCT)
+                cash += proceeds
+                pnl = proceeds - pos['qty'] * pos['entry_price']
+                trades.append({'date': today, 'ticker': ticker, 'action': 'SELL',
+                               'reason': 'STOP_LOSS' if hard_stop else 'TRAILING_STOP',
+                               'qty': pos['qty'], 'price': fill, 'pnl': pnl})
+                del positions[ticker]
+
+        # 2. Rebalance — rank candidates, equal-weight the top N
+        if today in rebalance_dates:
+            for ticker, pos in list(positions.items()):
+                price = today_prices.get(ticker)
+                if price is None or np.isnan(price):
+                    continue
+                fill = _fill_price(price, 'SELL')
+                proceeds = fill * pos['qty'] * (1 - BACKTEST_TRANSACTION_COST_PCT)
+                cash += proceeds
+                pnl = proceeds - pos['qty'] * pos['entry_price']
+                trades.append({'date': today, 'ticker': ticker, 'action': 'SELL',
+                               'reason': 'REBALANCE', 'qty': pos['qty'], 'price': fill, 'pnl': pnl})
+            positions = {}
+
+            equity_now = cash
+            portfolio_peak = max(portfolio_peak, equity_now)
+            drawdown = (portfolio_peak - equity_now) / portfolio_peak if portfolio_peak > 0 else 0.0
+            halted = drawdown >= MAX_DRAWDOWN_PCT
+
+            if not halted:
+                today_sig = signal_df[signal_df['date'] == today].dropna(subset=['pred_return'])
+                if min_r2 is not None:
+                    today_sig = today_sig[today_sig['r2'] >= min_r2]
+                if require_positive:
+                    today_sig = today_sig[today_sig['pred_return'] > 0]
+                picks = today_sig.sort_values('pred_return', ascending=False).head(top_n)
+
+                n_picks = len(picks)
+                if n_picks:
+                    alloc_per_position = cash / n_picks
+                    for _, row in picks.iterrows():
+                        ticker = row['ticker']
+                        price = today_prices.get(ticker)
+                        if price is None or np.isnan(price):
+                            continue
+                        fill = _fill_price(price, 'BUY')
+                        qty = int(alloc_per_position / (fill * (1 + BACKTEST_TRANSACTION_COST_PCT)))
+                        if qty < 1:
+                            continue
+                        cost = fill * qty * (1 + BACKTEST_TRANSACTION_COST_PCT)
+                        if cost > cash:
+                            continue
+                        cash -= cost
+                        positions[ticker] = {'qty': qty, 'entry_price': fill, 'peak_price': fill}
+                        trades.append({'date': today, 'ticker': ticker, 'action': 'BUY',
+                                       'reason': 'SIGNAL', 'qty': qty, 'price': fill, 'pnl': None})
+
+        # 3. Mark to market
+        holdings_value = sum(
+            pos['qty'] * today_prices[t]
+            for t, pos in positions.items()
+            if not np.isnan(today_prices.get(t, np.nan))
+        )
+        equity = cash + holdings_value
+        portfolio_peak = max(portfolio_peak, equity)
+        equity_curve.append({'date': today, 'equity': equity})
+
+    equity_df = pd.DataFrame(equity_curve).set_index('date')
+
+    bh_start_prices = prices.iloc[BACKTEST_MIN_HISTORY_DAYS]
+    bh_shares = (capital / len(universe)) / bh_start_prices
+    equity_df['benchmark_equity'] = (
+        prices.iloc[BACKTEST_MIN_HISTORY_DAYS:] * bh_shares
+    ).sum(axis=1).values
+
+    trades_df = pd.DataFrame(trades)
+    metrics = _compute_metrics(equity_df, trades_df, capital)
+    metrics['top_n'] = top_n
 
     return {'equity_curve': equity_df, 'trades': trades_df, 'metrics': metrics}
 
