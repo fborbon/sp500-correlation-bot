@@ -341,14 +341,28 @@ with tab_signals:
         buys  = (df['signal'] == 'BUY').sum()
         sells = (df['signal'] == 'SELL').sum()
         holds = (df['signal'] == 'HOLD').sum()
+        # 'selected' (added Oct 2026) is what actually drives live trading now -- rank-based
+        # top-TOP_N_POSITIONS by predicted return, independent of the BUY/SELL/HOLD label
+        # above (which is informational only, see README's Signal Selection section). Surface
+        # it explicitly so this tab can't be misread as "0 BUY = nothing is being traded".
+        selected = int(df['selected'].sum()) if 'selected' in df.columns else None
         if is_mobile:
-            _kpi_row([('Tickers', len(df)), ('BUY', buys), ('SELL', sells), ('HOLD', holds)])
+            kpis = [('Tickers', len(df)), ('BUY', buys), ('SELL', sells), ('HOLD', holds)]
+            if selected is not None:
+                kpis.append(('Selected', selected))
+            _kpi_row(kpis)
         else:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric('Tickers', len(df))
-            c2.metric('BUY',  buys)
-            c3.metric('SELL', sells)
-            c4.metric('HOLD', holds)
+            cols = st.columns(5 if selected is not None else 4)
+            cols[0].metric('Tickers', len(df))
+            cols[1].metric('BUY',  buys, help='Informational label only (legacy threshold) — '
+                                            'does not drive trading, see "Selected" instead.')
+            cols[2].metric('SELL', sells, help='Informational label only (legacy threshold).')
+            cols[3].metric('HOLD', holds, help='Informational label only (legacy threshold).')
+            if selected is not None:
+                cols[4].metric('Selected', selected,
+                               help='Top tickers by predicted return — this is what actually '
+                                    'drives live trading (rank-based, see README § Signal '
+                                    'Selection). Independent of the BUY/SELL/HOLD labels.')
         st.divider()
 
         if is_mobile:
