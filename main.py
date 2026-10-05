@@ -231,25 +231,34 @@ def _load_backtest_features(prices_df) -> tuple:
 
 
 def run_backtest_cli(n_tickers: int = 20) -> None:
-    """Walk-forward backtest of the live strategy, net of commissions/slippage.
+    """Walk-forward backtest of the LIVE strategy — rank-based top-TOP_N_POSITIONS
+    selection, equal-weight sizing, momentum/illiquidity/realized_vol/vix_level
+    features — net of commissions/slippage. Matches main.py's execute_trades
+    exactly (analysis/backtest.py's simulate_ranked_from_signals()), so this is
+    what the dashboard's Backtest tab should reflect. The older threshold-based
+    simulate_from_signals()/run_backtest() still exist for comparison/research
+    (see `python main.py sweep`) but no longer drive this CLI, since they test
+    a strategy that isn't the one actually trading.
 
     Reuses whatever is already in cache/prices_cache.parquet (populated by any
     prior `signals`/`paper`/`live` run) — run `python main.py signals` first if
     the cache is empty.
     """
     import json
-    from analysis.backtest import run_backtest
-    from config import CACHE_DIR
+    from analysis.backtest import compute_signal_history, simulate_ranked_from_signals
+    from config import CACHE_DIR, TOP_N_POSITIONS
 
     label = 'full S&P 500 universe (~502 tickers)' if n_tickers is None else f'top {n_tickers} tickers'
-    print(f"\nBacktest — {label} by market cap")
+    print(f"\nBacktest (live strategy: rank-based top {TOP_N_POSITIONS}) — {label} by market cap")
     prices_df = _load_backtest_prices(n_tickers)
     if prices_df.empty:
         print("✗ No cached price data. Run `python main.py signals <n>` first to populate the cache.")
         return
     volume_df, vix = _load_backtest_features(prices_df)
 
-    result = run_backtest(prices_df, n_tickers=n_tickers, volume_df=volume_df, vix=vix)
+    universe, prices, signal_df = compute_signal_history(
+        prices_df, n_tickers=n_tickers, volume_df=volume_df, vix=vix)
+    result = simulate_ranked_from_signals(universe, prices, signal_df, top_n=TOP_N_POSITIONS)
     metrics = result['metrics']
 
     print("\n=== Backtest results ===")
