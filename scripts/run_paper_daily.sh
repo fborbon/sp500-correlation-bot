@@ -22,3 +22,11 @@ echo "=== $(date -u) — Done ===" >> "$LOG"
 cd "$APP_DIR/outputs"
 ls -dt */ 2>/dev/null | tail -n +2 | xargs -r sudo rm -rf
 echo "=== $(date -u) — Old runs cleaned ===" >> "$LOG"
+
+# Prune this script's own logs older than 30 days (~4 weekly runs) -- these had been
+# accumulating unbounded since the project's first deploy (106 files, 375MB, back to
+# May) because nothing ever cleaned them. The host-level weekly-disk-cleanup.sh cron
+# (Docker build cache + journal logs) doesn't know about this path, so it belongs here,
+# next to the thing that creates them.
+find "$APP_DIR/logs" -name 'paper_*.log' -mtime +30 -delete
+echo "=== $(date -u) — Logs older than 30 days pruned ===" >> "$LOG"

@@ -691,3 +691,12 @@ flowchart TD
     style BUILD fill:#2c3e50,color:#fff
     style VOL fill:#7f8c8d,color:#fff
 ```
+
+### Disk Space Maintenance
+
+Two separate weekly cron jobs keep the shared EC2 instance from filling up — split because one is host-wide (not specific to this project) and one is specific to this repo's own log output:
+
+- **`/home/ubuntu/weekly-disk-cleanup.sh`** (Sundays 04:00, not part of this repo — lives directly on the host since it also covers job-hunter-suite, windward, energy-trader, and anything else sharing the instance). Prunes Docker's build cache and dangling images/containers, and vacuums the systemd journal down to 200MB. Docker build cache in particular grows unbounded with every `docker compose up -d --build` across every project on the box — in October 2026 it reached 17GB before a cleanup.
+- **`scripts/run_paper_daily.sh`** (Mondays 16:15 ET, this repo — see [CI/CD](#how-it-is-applied-here)) already kept only the newest `outputs/` folder; it now also deletes its own `logs/paper_*.log` files older than 30 days. These had grown unbounded since the first deploy (106 files, 375MB by October 2026) because nothing previously cleaned them — the host-level script above doesn't know this path exists, so retention belongs here, next to the code that creates them.
+
+Neither job touches `cache/prices_cache.parquet`, `volume_cache.parquet`, `vix_cache.parquet`, `risk_state.json`, or the current `outputs/` run — only build artifacts, old logs, and already-superseded output folders.
