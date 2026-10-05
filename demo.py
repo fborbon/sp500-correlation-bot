@@ -3,7 +3,7 @@ import datetime
 import numpy as np
 import pandas as pd
 
-from config import HISTORY_DAYS, OUTPUTS_DIR
+from config import OUTPUTS_DIR
 from analysis.correlations import compute_correlations, get_top_correlated_pairs, get_top_inverse_pairs
 from analysis.signals import generate_signals
 from reporting.charts import plot_correlation_matrix
@@ -23,7 +23,10 @@ def run_demo():
     print("=" * 62)
 
     np.random.seed(42)
-    n_days = HISTORY_DAYS
+    # NOT HISTORY_DAYS (99999 -- that's "don't limit the real cached history", not a literal
+    # simulated-day count): compounding synthetic daily returns for ~100,000 steps decays
+    # every price toward zero (geometric compounding of noise), breaking the demo entirely.
+    n_days = 500
     base_prices = {
         'AAPL': 189.0,  'MSFT': 412.0,  'NVDA': 876.0,  'AMZN': 185.0,
         'GOOGL': 167.0, 'META': 502.0,  'LLY': 734.0,   'TSLA': 178.0,

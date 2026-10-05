@@ -57,11 +57,25 @@ MCAP_CACHE_MAX_AGE_HOURS  = 24   # hours before market-cap snapshot is considere
 HISTORY_DAYS     = 99999   # Use all cached history; set lower to limit analysis window
 PREDICTION_DAYS  = 7       # Prediction horizon (days)
 MIN_CORRELATION  = 0.50    # Minimum correlation to use as predictor
-MIN_R2           = 0.01    # Minimum R² to trust the signal. =0.40
-BUY_THRESHOLD    = 0.01    # Predicted return > X% → BUY
-SELL_THRESHOLD   = -0.10   # Predicted return < -X% → SELL
+MIN_R2           = 0.01    # Informational only below (see TOP_N_POSITIONS) — kept for the
+                            # LOW_CONFIDENCE display label and backward compat with
+                            # analysis/backtest.py's simulate_from_signals()/run_backtest().
+BUY_THRESHOLD    = 0.01    # Informational only below (see TOP_N_POSITIONS) — kept for the
+                            # 'signal' display label and the same backward compat.
+SELL_THRESHOLD   = -0.10   # Informational only — drives the 'signal' SELL display label;
+                            # actual live selling is driven by falling out of the top-N
+                            # selection at rebalance, or stop-loss/trailing-stop.
 ORDER_QUANTITY        = 10       # Shares per order (paper trading)
-MAX_POSITION_PCT      = 0.10     # Maximum % of portfolio per position
+MAX_POSITION_PCT      = 0.10     # Safety ceiling on any single position, even under equal-weight
+TOP_N_POSITIONS       = 15       # Live trading selection: rank all tickers with predicted_return
+                                  # > 0 and hold the top N, equal-weighted. Replaces BUY_THRESHOLD
+                                  # (an absolute magnitude cutoff) + R2-scaled sizing — an October
+                                  # 2026 backtest investigation found predicted-return magnitude
+                                  # and R2 are both ~uncorrelated with outcome quality, while
+                                  # rank-based selection with flat sizing held up out-of-sample
+                                  # (~3x the Sharpe ratio of the old approach on an independent
+                                  # window). See analysis/backtest.py's simulate_ranked_from_signals
+                                  # and the README's Signal Selection / Auditing sections.
 FALLBACK_PORTFOLIO    = 1_000.0  # Used when IB does not return NetLiquidation
 
 # Risk management

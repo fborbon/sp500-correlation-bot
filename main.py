@@ -1,7 +1,7 @@
 import warnings
 warnings.filterwarnings('ignore')
 
-from config import MAX_DRAWDOWN_PCT, MIN_R2, OUTPUTS_DIR, TOP_N_HIGHLIGHT, create_run_dirs
+from config import MAX_DRAWDOWN_PCT, OUTPUTS_DIR, TOP_N_HIGHLIGHT, create_run_dirs
 from broker.connection import connect_ib
 from broker.data import (fetch_prices, fetch_prices_free, fetch_prices_cached,
                          fetch_volume_free, fetch_volume_cached)
@@ -167,25 +167,36 @@ def run_bot(execute_trades: bool = False, save_plots: bool = True,
             portfolio_value = get_portfolio_value(ib)
             halted = check_max_drawdown(risk_state, portfolio_value)
             if halted:
-                print(f"\n  ⚠ Max drawdown ({MAX_DRAWDOWN_PCT:.0%}) breached — "
-                      f"new BUY orders halted this run. SELL/stop-loss closes still apply.")
+                print(f"\n  ⚠ Max drawdown ({MAX_DRAWDOWN_PCT:.0%}) breached — rebalance skipped "
+                      f"this run (no new buys, no selection-driven sells). Stop-loss/"
+                      f"trailing-stop closes above still applied.")
+            else:
+                # Rank-based rebalance: hold exactly this run's top TOP_N_POSITIONS tickers
+                # by predicted return, equal-weighted. Validated (Oct 2026) to outperform the
+                # old per-ticker BUY/SELL-signal + R2-scaled-sizing approach — see
+                # analysis/backtest.py's simulate_ranked_from_signals and the README.
+                selected = set(signals_df[signals_df['selected']]['ticker'])
+                held_positions = {p.contract.symbol: p for p in ib.positions()}
+                held_tickers = set(held_positions.keys())
 
-            print(f"\nPlacing orders (portfolio: ${portfolio_value:,.0f})...")
-            actionable = signals_df[signals_df['signal'].isin(['BUY', 'SELL'])]
-            for _, row in actionable.iterrows():
-                if row['model_r2'] < MIN_R2:
-                    continue
-                if row['signal'] == 'BUY' and halted:
-                    continue
+                print(f"\nRebalancing to {len(selected)} ranked positions "
+                      f"(portfolio: ${portfolio_value:,.0f})...")
 
-                strength = min(1.0, row['model_r2'])
-                qty = calculate_position_size(portfolio_value, row['current_price'], strength)
-                execute_order(ib, row['ticker'], row['signal'], qty)
+                for ticker in held_tickers - selected:
+                    pos = held_positions[ticker]
+                    execute_order(ib, ticker, 'SELL', abs(int(pos.position)))
+                    remove_position(risk_state, ticker)
 
-                if row['signal'] == 'BUY':
-                    register_entry(risk_state, row['ticker'], row['current_price'], qty)
-                else:
-                    remove_position(risk_state, row['ticker'])
+                price_lookup = signals_df.set_index('ticker')['current_price']
+                for ticker in selected - held_tickers:
+                    price = price_lookup.get(ticker)
+                    if price is None or price <= 0:
+                        continue
+                    qty = calculate_position_size(portfolio_value, price, len(selected))
+                    if qty < 1:
+                        continue
+                    execute_order(ib, ticker, 'BUY', qty)
+                    register_entry(risk_state, ticker, price, qty)
         finally:
             save_risk_state(risk_state)
             ib.disconnect()

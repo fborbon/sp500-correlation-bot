@@ -19,14 +19,15 @@ Algorithmic trading bot for Interactive Brokers that predicts short-term 7-day p
 7. [File Structure](#file-structure)
 8. [Key Configuration (`config.py`)](#key-configuration-configpy)
 9. [Selecting Companies](#selecting-companies)
-10. [Position Sizing](#position-sizing)
-11. [Risk Management](#risk-management)
-12. [Backtesting](#backtesting)
-13. [Weekly DCA Simulator](#weekly-dca-simulator)
-14. [Inverse Correlation Logic](#inverse-correlation-logic)
-15. [Output Plots (`save_plots=True`)](#output-plots-saveplotstrue)
-16. [Auditing](#auditing)
-17. [CI/CD](#cicd)
+10. [Signal Selection](#signal-selection)
+11. [Position Sizing](#position-sizing)
+12. [Risk Management](#risk-management)
+13. [Backtesting](#backtesting)
+14. [Weekly DCA Simulator](#weekly-dca-simulator)
+15. [Inverse Correlation Logic](#inverse-correlation-logic)
+16. [Output Plots (`save_plots=True`)](#output-plots-saveplotstrue)
+17. [Auditing](#auditing)
+18. [CI/CD](#cicd)
 
 ---
 
@@ -387,10 +388,11 @@ V3/
 | `HISTORY_DAYS` | `99999` | Trading days of history (99999 = use full cache) |
 | `PREDICTION_DAYS` | `7` | Forecast horizon (days) |
 | `MIN_CORRELATION` | `0.50` | Minimum absolute Pearson r to use a predictor (direct or inverse) |
-| `MIN_R2` | `0.01` | Minimum R² to trust a signal |
-| `BUY_THRESHOLD` | `0.01` | Predicted return > 1% → BUY |
-| `SELL_THRESHOLD` | `-0.10` | Predicted return < −10% → SELL |
-| `MAX_POSITION_PCT` | `0.10` | Max 10% of portfolio per position |
+| `MIN_R2` | `0.01` | Informational only — drives the display-only `LOW_CONFIDENCE` label, not live selection (see [Signal Selection](#signal-selection)) |
+| `BUY_THRESHOLD` | `0.01` | Informational only — drives the display-only `BUY` label, not live selection |
+| `SELL_THRESHOLD` | `-0.10` | Informational only — drives the display-only `SELL` label, not live selection |
+| `TOP_N_POSITIONS` | `15` | Live trading: top N tickers by predicted return (among positive predictions) held, equal-weighted |
+| `MAX_POSITION_PCT` | `0.10` | Per-position safety ceiling — no single position exceeds 10% of portfolio even under equal-weight |
 | `TOP_N_HIGHLIGHT` | `15` | Companies highlighted in price series and bar charts |
 | `FALLBACK_PORTFOLIO` | `1000.0` | Portfolio value used when IB does not return NetLiquidation |
 | `FALLBACK_TICKERS` | top 20 | Used when all online sources fail |
@@ -428,24 +430,39 @@ When `n` is specified, all ~503 Wikipedia tickers are fetched then sorted by rea
 
 ---
 
+## Signal Selection
+
+**As of October 2026, live trading selection is rank-based, not threshold-based.** `analysis/signals.py`'s `generate_signals()` still computes and displays the legacy per-ticker `signal` label (`BUY`/`SELL`/`HOLD`/`LOW_CONFIDENCE`/`INSUF_DATA`, based on the absolute `BUY_THRESHOLD`/`MIN_R2`/`SELL_THRESHOLD` cutoffs) purely for informational display — it no longer drives trading. What actually gets traded is the separate `selected` column: **the top `TOP_N_POSITIONS` tickers by predicted return among those with a positive prediction, regardless of raw magnitude or R².**
+
+This replaced the original design after a multi-day backtest investigation (October 2026) found, and then validated out-of-sample:
+
+- **`BUY_THRESHOLD` (an absolute magnitude cutoff) was filtering for noise, not against it.** A sweep found predicted-return magnitude is essentially uncorrelated with R² or realized outcome quality (r ≈ −0.03 to −0.05). Replacing the magnitude cutoff with rank-based selection (always trade the top N candidates, whatever their raw values) nearly **3×'d the Sharpe ratio** (0.39 → 1.10) on an independent, non-overlapping out-of-sample window — a real, reproducible improvement.
+- **R²-scaled position sizing (`strength = min(1.0, r2)`) was a structural bug, not a calibration nuance.** Real R² values from this model are almost always well below 1.0 (frequently negative), so at realistic share prices the old formula produced `qty = 0` — no trade at all — for nearly every signal that wasn't already near-maximum confidence, and went negative (silently skipped) whenever R² < 0.
+
+See [Auditing](#auditing) for the full investigation, including an equally important negative result: a longer 21-day prediction horizon looked like a further improvement on one universe/window, then completely reversed (best → worst result in the whole study) on retest — it was not shipped.
+
+---
+
 ## Position Sizing
 
-The spend per order is calculated in `broker/orders.py`:
+The spend per order is calculated in `broker/orders.py`'s `calculate_position_size()`: **equal-weight across the tickers selected this run**, capped by `MAX_POSITION_PCT` as a per-position safety ceiling.
 
 ```
-portfolio_value  ×  MAX_POSITION_PCT  ×  signal_strength
+portfolio_value / n_selected,  capped at  portfolio_value × MAX_POSITION_PCT
 ```
 
-- `MAX_POSITION_PCT = 0.10` → max 10% of portfolio per position
-- `signal_strength = min(1.0, model_r2)` → scales down if R² < 1.0
+- `TOP_N_POSITIONS = 15` → up to 15 equal-weight positions held at once
+- `MAX_POSITION_PCT = 0.10` → no single position exceeds 10% of portfolio even if fewer than 15 names are selected
+- Returns `0` (not a forced minimum of 1 share) when the allocated budget can't afford even one share at that price — the old formula's `max(1, ...)` could force-buy one share of an expensive stock on a tiny allocated budget, silently blowing through the intended position size.
 
-Example — $100,000 portfolio, buying a $300 stock with R²=0.6:
+Example — $100,000 portfolio, 10 tickers selected this run, buying a $300 stock:
 ```
-max_value = 100,000 × 0.05 × 0.6 = $3,000
-quantity  = int(3,000 / 300)      = 10 shares
+equal_weight_value = 100,000 / 10          = $10,000
+max_value           = min(10,000, 10,000)   = $10,000   (MAX_POSITION_PCT cap not binding here)
+quantity             = int(10,000 / 300)     = 33 shares
 ```
 
-To change the spend amount, adjust `MAX_POSITION_PCT` or `FALLBACK_PORTFOLIO` in `config.py`.
+To change position count or sizing, adjust `TOP_N_POSITIONS` or `MAX_POSITION_PCT` in `config.py`.
 
 ---
 
@@ -484,7 +501,7 @@ python main.py backtest 20     # top 20 tickers by market cap
 python main.py backtest full   # full ~502-ticker universe — several hours; see below
 ```
 
-Output (`cache/backtest_latest/` — deliberately not under `outputs/`, where the dashboard treats the newest folder as the latest run and the daily cron deletes all but the newest):
+Output (`cache/backtest_latest/` — deliberately not under `outputs/`, where the dashboard treats the newest folder as the latest run and the weekly cron deletes all but the newest):
 - `equity_curve.csv` — daily strategy equity vs. the buy-and-hold benchmark
 - `trades.csv` — every simulated fill with reason (`SIGNAL` / `STOP_LOSS` / `TRAILING_STOP` / `REBALANCE`) and P&L
 - `metrics.json` — total return, CAGR, Sharpe ratio, max drawdown, win rate, trade count, benchmark return
@@ -564,9 +581,21 @@ This section provides a structured checklist for review by an IT expert and a qu
 - **Code efficiency** — Parquet incremental update with a 15-day overlap window correctly handles dividend/split adjustments. Parallel fundamentals fetching (10 threads, 2 retries) minimizes I/O wait. Market-cap cache (24h TTL) avoids redundant yfinance calls. `n_jobs=-1` parallelizes Random Forest tree construction across all CPU cores.
 - **Cybersecurity** — Interactive Brokers credentials are managed by TWS/Gateway locally; no API keys are stored in the project. Live trading requires an explicit manual confirmation step. All data sources (Yahoo Finance, Wikipedia, IB) are accessed over standard HTTPS/local socket connections.
 - **Readability & maintainability** — All constants are centralized in `config.py`. The walk-forward cross-validation rationale and each model hyperparameter are documented. The signal generation logic is compact and auditable.
-- **AI / ML model adequacy** — Random Forest with `TimeSeriesSplit` is sound for this task. `MIN_R2=0.01` is a very permissive confidence threshold that may generate signals from models with near-zero predictive power. Pearson correlation assumes linear relationships; non-linear cross-stock dependencies are not captured at the predictor selection stage.
-- **Financial risk** — Live trading operates with real money. [Stop-loss, trailing-stop, and a portfolio max-drawdown circuit breaker](#risk-management) are now enforced on every run (`broker/risk.py`), and the strategy is validated net of commissions/slippage by a [walk-forward backtester](#backtesting) before being trusted live. `MAX_POSITION_PCT=0.10` limits per-position concentration, but multiple correlated BUY signals can still create sector concentration — the drawdown circuit breaker is the backstop for that scenario, not a substitute for diversification. Correlation-based strategies historically break down during market dislocations (e.g., credit crises, flash crashes); the backtest's 2024–2026 window does not include a crisis period, so the max-drawdown guard remains the primary defense against a genuine regime break.
+- **AI / ML model adequacy** — Random Forest with `TimeSeriesSplit` is sound as a modeling choice, but an October 2026 investigation (below) found walk-forward R² on the 7-day return regression is negative more often than not (median ≈ −0.07 even among signals the model is bullish on), and is essentially uncorrelated with predicted-return magnitude or realized outcome quality (r ≈ −0.03 to −0.05). Pearson correlation assumes linear relationships; non-linear cross-stock dependencies are not captured at the predictor-selection stage. No configuration tested — across MIN_R2, BUY_THRESHOLD, position count, three market-cap tiers, and two prediction horizons — beat simply holding the index. See [Strategy Validation Findings](#strategy-validation-findings-october-2026) below for the full investigation.
+- **Financial risk** — Live trading operates with real money. [Stop-loss, trailing-stop, and a portfolio max-drawdown circuit breaker](#risk-management) are now enforced on every run (`broker/risk.py`), and the strategy is validated net of commissions/slippage by a [walk-forward backtester](#backtesting) before being trusted live. `MAX_POSITION_PCT=0.10` limits per-position concentration, but multiple correlated BUY signals can still create sector concentration — the drawdown circuit breaker is the backstop for that scenario, not a substitute for diversification. Correlation-based strategies historically break down during market dislocations (e.g., credit crises, flash crashes); the backtest windows used so far do not include a crisis period, so the max-drawdown guard remains the primary defense against a genuine regime break.
 - **Other** — Wikipedia HTML scraping for S&P 500 constituents is fragile; a format change could break the entire universe-selection stage. yfinance data quality and availability are not guaranteed and should not be the sole data source for live trading decisions.
+
+### Strategy Validation Findings (October 2026)
+
+A multi-day investigation tested whether the correlation/Random-Forest strategy has any validated edge, and whether its confidence thresholds were well-calibrated. Full methodology and raw results are preserved in `analysis/backtest.py` (`run_min_r2_sweep`, `simulate_ranked_from_signals`, `compute_momentum_signal`) and this conversation's scripts; the findings below are the ones that changed the live code.
+
+1. **`MIN_R2` sweep (full ~497-ticker universe, 2024–2026 window)** — at the original production default (`MIN_R2=0.01`), the strategy traded 349 times for essentially a breakeven return (−0.01%) while an equal-weight buy-and-hold of the same universe returned **+40.33%**. Every threshold from −2.0 to +0.01 produced *identical* results — later traced to a separate bug (next finding), not a genuine plateau. Only a much stricter `MIN_R2=0.10` showed a thin positive edge (8 trades, Sharpe +0.93) — too few trades to trust.
+2. **Root cause found: `BUY_THRESHOLD` and R²-scaled sizing were both broken.** A grid search crossing `MIN_R2` with `BUY_THRESHOLD` showed *loosening* `BUY_THRESHOLD` to 0% (trade any positive prediction, not just ones exceeding +1%) consistently **beat** the original cutoff at every `MIN_R2` level — the model's predicted-return *magnitude* carries ~no quality signal, so requiring a bigger one filters for noise. Separately, `strength = min(1.0, r2)` was found to produce `qty = 0` (no trade at all) at realistic share prices for nearly any real R² value, and to go negative (silently skipped) whenever R² < 0 — explaining the earlier "identical results from −2.0 to +0.01": negative-R² candidates were being zeroed out by the sizing formula regardless of the nominal threshold.
+3. **Out-of-sample validation #1: CONFIRMED.** Replaying the exact `BUY_THRESHOLD=0` fix on a non-overlapping earlier window (2021-10 → 2024-04, 100 tickers) reproduced the improvement independently: Sharpe 0.39 → 1.10 at `MIN_R2=0.01`. This is why the fix shipped — see [Signal Selection](#signal-selection).
+4. **Universe-tier sensitivity (top/middle/bottom 20 by market cap, rank-based strategy).** None of nine strategy/universe combinations beat buy-and-hold. Top-20 (megacap) lost money on every strategy tested while the universe itself returned +122.73% — consistent with megacaps being the most efficiently-priced, hardest-to-beat segment. Bottom-20's buy-and-hold itself *lost* 32%; all three active strategies lost markedly less (−6.7% to −12.8%) than passive holding — a real, if modest, capital-preservation benefit from the risk management, not alpha generation.
+5. **21-day horizon: tested, then disconfirmed.** Academic research on return predictability suggests short horizons are the noisiest (motivating a longer-horizon test). On the recent window, middle-20 + 21-day was the single best result in the whole investigation (+3.42% return, Sharpe +0.22). Out-of-sample validation #2, replaying the *exact same* 20 tickers on the 2021–2024 window, reversed it completely: **-17.79% return, Sharpe -1.18, 0% win rate** — the single worst result in the study. Not shipped; this closes the question rather than leaving it open for re-litigation without new evidence.
+
+**Net result:** the rank-based selection + equal-weight sizing fix is real and shipped (validated out-of-sample, ~3× Sharpe improvement over the old defaults). It is a bug fix, not a discovered edge — no tested configuration, including the fixed one, outperforms simply holding the index. This matches the academic literature on cross-sectional return prediction (e.g., Gu, Kelly & Xiu 2020): individual-stock signal-to-noise is low, aggregation into ranked portfolios is what survives, and price-correlation alone is not among the dominant real signals (momentum, liquidity, volatility are) — motivating the next investigation into adding those as model inputs.
 
 ### Summary Table
 
@@ -577,8 +606,8 @@ This section provides a structured checklist for review by an IT expert and a qu
 | Code efficiency | Incremental Parquet update, parallel fundamentals fetch, and CPU-parallel Random Forest are all appropriate. | |
 | Cybersecurity | IB credentials managed locally by TWS. No API keys in code. Live trading has manual confirmation gate. | |
 | Readability & maintainability | Configuration centralized in config.py. Hyperparameter and model rationale well-documented. | |
-| AI / ML model adequacy | Random Forest with TimeSeriesSplit is appropriate. MIN_R2=0.01 is very permissive — borderline signals may proliferate. Linear Pearson correlation may miss non-linear dependencies. | |
-| Financial risk | No stop-loss or drawdown limit. Correlated BUY signals could create sector concentration. Strategy vulnerable to market dislocation events. | |
+| AI / ML model adequacy | Random Forest with TimeSeriesSplit is appropriate as a modeling choice. Validated (Oct 2026): R² is ~uncorrelated with predicted-return quality; no tested config beats buy-and-hold. Rank-based selection fix shipped (confirmed out-of-sample); 21-day horizon tested and disconfirmed out-of-sample. | |
+| Financial risk | Stop-loss, trailing-stop, and max-drawdown circuit breaker enforced (broker/risk.py). Correlated BUY signals could still create sector concentration. Strategy vulnerable to market dislocation events not yet seen in backtest windows. | |
 | Other | Wikipedia scraping for constituents is fragile. yfinance is not a guaranteed production data source. No backtesting framework for signal validation. | |
 
 

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from config import BUY_THRESHOLD, MIN_R2, SELL_THRESHOLD
+from config import BUY_THRESHOLD, MIN_R2, SELL_THRESHOLD, TOP_N_POSITIONS
 from analysis.model import predict_price
 
 
@@ -10,7 +10,15 @@ def generate_signals(prices_df: pd.DataFrame, returns: pd.DataFrame,
     """Generate a BUY/SELL/HOLD signal for each ticker based on predicted return.
 
     Predictors are split into direct (positive r) and inverse (negative r) groups.
-    Returns a DataFrame sorted by predicted_return descending.
+    Returns a DataFrame sorted by predicted_return descending, with:
+      - 'signal': the per-ticker BUY/SELL/HOLD/LOW_CONFIDENCE/INSUF_DATA label —
+        informational, based on the legacy absolute BUY_THRESHOLD/MIN_R2 cutoffs.
+      - 'selected': the column that actually drives live trading (see main.py's
+        execute_trades) — True for the top TOP_N_POSITIONS tickers by predicted
+        return among those with predicted_return > 0, regardless of 'signal' or
+        R². This rank-based selection was validated out-of-sample to outperform
+        the old absolute-threshold + R2-scaled-sizing approach; see
+        analysis/backtest.py's simulate_ranked_from_signals and the README.
     """
     current_prices = prices_df.iloc[-1]
     signals = []
@@ -56,5 +64,13 @@ def generate_signals(prices_df: pd.DataFrame, returns: pd.DataFrame,
               f"ret={ret_str}  R²={r2:.2f}  [{signal}]{inv_str}")
 
     df = pd.DataFrame(signals)
+    # Explicit numeric coercion: if every ticker hit INSUF_DATA, predicted_return is all None
+    # and pandas infers dtype=object, which nlargest() below can't handle.
+    df['predicted_return'] = pd.to_numeric(df['predicted_return'], errors='coerce')
     df.sort_values('predicted_return', ascending=False, inplace=True, na_position='last')
+
+    candidates = df[df['predicted_return'] > 0]
+    top_tickers = set(candidates.nlargest(TOP_N_POSITIONS, 'predicted_return')['ticker'])
+    df['selected'] = df['ticker'].isin(top_tickers)
+
     return df

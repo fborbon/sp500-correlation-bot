@@ -49,6 +49,10 @@ def print_report(signals_df: pd.DataFrame, top_pairs: list,
     holds = signals_df[signals_df['signal'] == 'HOLD']
 
     print(f"\n  SIGNALS: {len(buys)} BUY · {len(holds)} HOLD · {len(sells)} SELL\n")
+    if 'selected' in signals_df.columns:
+        n_selected = int(signals_df['selected'].sum())
+        print(f"  → {n_selected} selected for live rebalancing (rank-based, independent of the "
+              f"BUY/SELL labels above — see README § Signal Selection)\n")
 
     print("  ── BUY ──────────────────────────────────────────────────────")
     for _, r in buys.iterrows():
