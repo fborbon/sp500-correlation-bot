@@ -49,7 +49,8 @@ def _prep_universe(prices_df: pd.DataFrame, n_tickers: int):
 
 def compute_signal_history(prices_df: pd.DataFrame, n_tickers: int = 20,
                            verbose: bool = True, lookahead: int = None,
-                           rebalance_days: int = None) -> tuple:
+                           rebalance_days: int = None, volume_df: pd.DataFrame = None,
+                           vix: pd.Series = None) -> tuple:
     """Walk forward once, scoring every ticker at every rebalance date.
 
     This is the expensive step: one RandomForestRegressor fit (+3 CV-fold fits)
@@ -70,6 +71,11 @@ def compute_signal_history(prices_df: pd.DataFrame, n_tickers: int = 20,
                         rebalancing weekly against a 21-day forecast would
                         close positions before the predicted move has time to
                         happen), else config.BACKTEST_REBALANCE_DAYS.
+        volume_df:      Optional — enables the Amihud illiquidity feature (see
+                        analysis/model.py). Truncated to each rebalance date
+                        before use, same no-lookahead discipline as prices.
+        vix:            Optional — enables the market-wide VIX-level feature.
+                        Also truncated per rebalance date.
 
     Returns (universe, prices, signal_df) where signal_df has one row per
     (date, ticker) with columns ['pred_return', 'r2'] — everything a strategy
@@ -83,10 +89,16 @@ def compute_signal_history(prices_df: pd.DataFrame, n_tickers: int = 20,
     for k, i in enumerate(rebalance_pts, 1):
         today = dates[i]
         hist_prices = prices.iloc[:i + 1]
+        # Truncated to `today` (not the un-sliced full series) so an engineered feature can
+        # never see a future value, regardless of how analysis/model.py's reindex logic
+        # might change later — same no-lookahead discipline as hist_prices.
+        hist_volume = volume_df.loc[:today] if volume_df is not None else None
+        hist_vix    = vix.loc[:today] if vix is not None else None
         corr_matrix, returns = compute_correlations(hist_prices)
 
         for ticker in universe:
-            pred_ret, r2, *_ = predict_price(ticker, returns, corr_matrix, lookahead=lookahead)
+            pred_ret, r2, *_ = predict_price(ticker, returns, corr_matrix, lookahead=lookahead,
+                                             prices=hist_prices, volume=hist_volume, vix=hist_vix)
             rows.append({'date': today, 'ticker': ticker, 'pred_return': pred_ret, 'r2': r2})
 
         if verbose:
@@ -390,22 +402,28 @@ def simulate_ranked_from_signals(universe: list, prices: pd.DataFrame, signal_df
 
 
 def run_backtest(prices_df: pd.DataFrame, n_tickers: int = 20, start_capital: float = None,
-                 verbose: bool = True, min_r2: float = None) -> dict:
+                 verbose: bool = True, min_r2: float = None, volume_df: pd.DataFrame = None,
+                 vix: pd.Series = None) -> dict:
     """Single-threshold backtest — thin wrapper kept for backward compatibility
     (dashboard's Backtest tab and `python main.py backtest` both use this).
     For comparing several MIN_R2 values without re-fitting, use
-    run_min_r2_sweep() instead.
+    run_min_r2_sweep() instead. `volume_df`/`vix` are optional and enable the
+    engineered momentum/liquidity/volatility features — see analysis/model.py.
     """
-    universe, prices, signal_df = compute_signal_history(prices_df, n_tickers, verbose)
+    universe, prices, signal_df = compute_signal_history(
+        prices_df, n_tickers, verbose, volume_df=volume_df, vix=vix)
     return simulate_from_signals(universe, prices, signal_df, min_r2=min_r2, start_capital=start_capital)
 
 
 def run_min_r2_sweep(prices_df: pd.DataFrame, n_tickers: int = 20,
                      min_r2_values: list = None, start_capital: float = None,
-                     verbose: bool = True) -> dict:
+                     verbose: bool = True, volume_df: pd.DataFrame = None,
+                     vix: pd.Series = None) -> dict:
     """Score every ticker/rebalance ONCE, then cheaply evaluate several MIN_R2
     thresholds against those same signals — answers "where is the confidence
     gate actually selective?" without paying the fitting cost N times.
+    `volume_df`/`vix` are optional and enable the engineered momentum/
+    liquidity/volatility features — see analysis/model.py.
 
     Returns {'summary': DataFrame (one row per min_r2, all metrics),
              'results': {min_r2: run_backtest()-shaped dict},
@@ -419,7 +437,8 @@ def run_min_r2_sweep(prices_df: pd.DataFrame, n_tickers: int = 20,
         # sweep has to reach well below 0 to find where the gate actually opens up.
         min_r2_values = [-2.0, -1.0, -0.5, -0.2, -0.1, -0.05, -0.02, 0.0, 0.01, 0.05, 0.1, 0.2]
 
-    universe, prices, signal_df = compute_signal_history(prices_df, n_tickers, verbose)
+    universe, prices, signal_df = compute_signal_history(
+        prices_df, n_tickers, verbose, volume_df=volume_df, vix=vix)
 
     valid = signal_df.dropna(subset=['pred_return'])
     buy_candidates = valid[valid['pred_return'] > BUY_THRESHOLD]

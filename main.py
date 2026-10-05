@@ -4,7 +4,7 @@ warnings.filterwarnings('ignore')
 from config import MAX_DRAWDOWN_PCT, OUTPUTS_DIR, TOP_N_HIGHLIGHT, create_run_dirs
 from broker.connection import connect_ib
 from broker.data import (fetch_prices, fetch_prices_free, fetch_prices_cached,
-                         fetch_volume_free, fetch_volume_cached)
+                         fetch_vix_cached, fetch_volume_free, fetch_volume_cached)
 from broker.orders import calculate_position_size, close_position, execute_order, get_portfolio_value
 from broker.risk import (check_max_drawdown, check_stop_losses, load_risk_state,
                          register_entry, remove_position, save_risk_state)
@@ -48,8 +48,12 @@ def run_bot(execute_trades: bool = False, save_plots: bool = True,
     top_pairs     = get_top_correlated_pairs(corr_matrix, top_n=10)
     inverse_pairs = get_top_inverse_pairs(corr_matrix, top_n=10)
 
+    print("\nFetch volume and VIX for engineered features (momentum/liquidity/volatility)")
+    volume_df = fetch_volume_cached(list(prices_df.columns))
+    vix = fetch_vix_cached()
+
     print("\nGenerate the signals table")
-    signals_df = generate_signals(prices_df, returns, corr_matrix)
+    signals_df = generate_signals(prices_df, returns, corr_matrix, volume_df=volume_df, vix=vix)
 
     print("\nEnrich signals with company name, sector, founded year, market cap (B)")
     company_meta = fetch_company_metadata(list(prices_df.columns), market_caps)
@@ -70,8 +74,7 @@ def run_bot(execute_trades: bool = False, save_plots: bool = True,
     print("\nSave prices for the dashboard interactive charts")
     prices_df.to_csv(run_dir / 'prices.csv')
 
-    print("\nFetch and save daily volume data")
-    volume_df = fetch_volume_cached(list(prices_df.columns))
+    print("\nSave volume data (already fetched above for engineered features)")
     volume_df.to_csv(run_dir / 'volume.csv')
 
     print("\nFetch and save the Fundamental analysis table")
@@ -218,6 +221,15 @@ def _load_backtest_prices(n_tickers) -> "pd.DataFrame":
     return prices_df.tail(BACKTEST_LOOKBACK_DAYS + BACKTEST_MIN_HISTORY_DAYS)
 
 
+def _load_backtest_features(prices_df) -> tuple:
+    """Volume + VIX, sliced to the same tickers/window as prices_df, for the
+    engineered momentum/liquidity/volatility features (see analysis/model.py)."""
+    volume_df = fetch_volume_cached(list(prices_df.columns))
+    volume_df = volume_df.reindex(prices_df.index)
+    vix = fetch_vix_cached().reindex(prices_df.index)
+    return volume_df, vix
+
+
 def run_backtest_cli(n_tickers: int = 20) -> None:
     """Walk-forward backtest of the live strategy, net of commissions/slippage.
 
@@ -235,8 +247,9 @@ def run_backtest_cli(n_tickers: int = 20) -> None:
     if prices_df.empty:
         print("✗ No cached price data. Run `python main.py signals <n>` first to populate the cache.")
         return
+    volume_df, vix = _load_backtest_features(prices_df)
 
-    result = run_backtest(prices_df, n_tickers=n_tickers)
+    result = run_backtest(prices_df, n_tickers=n_tickers, volume_df=volume_df, vix=vix)
     metrics = result['metrics']
 
     print("\n=== Backtest results ===")
@@ -272,8 +285,10 @@ def run_sweep_cli(n_tickers: int = 20, min_r2_values: list = None) -> None:
     if prices_df.empty:
         print("✗ No cached price data. Run `python main.py signals <n>` first to populate the cache.")
         return
+    volume_df, vix = _load_backtest_features(prices_df)
 
-    sweep = run_min_r2_sweep(prices_df, n_tickers=n_tickers, min_r2_values=min_r2_values)
+    sweep = run_min_r2_sweep(prices_df, n_tickers=n_tickers, min_r2_values=min_r2_values,
+                             volume_df=volume_df, vix=vix)
 
     print("\n=== MIN_R2 sweep summary ===")
     print(sweep['summary'].to_string(index=False))

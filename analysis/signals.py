@@ -6,10 +6,18 @@ from analysis.model import predict_price
 
 
 def generate_signals(prices_df: pd.DataFrame, returns: pd.DataFrame,
-                     corr_matrix: pd.DataFrame) -> pd.DataFrame:
+                     corr_matrix: pd.DataFrame, volume_df: pd.DataFrame = None,
+                     vix: pd.Series = None) -> pd.DataFrame:
     """Generate a BUY/SELL/HOLD signal for each ticker based on predicted return.
 
     Predictors are split into direct (positive r) and inverse (negative r) groups.
+    `volume_df`/`vix` are optional — when passed, predict_price() also uses each
+    ticker's own momentum, Amihud illiquidity, and realized volatility, plus the
+    market-wide VIX level, as extra model features (see analysis/model.py and the
+    README's Auditing section for why: price-correlation alone is not among the
+    academically dominant return-predictability signals; momentum/liquidity/
+    volatility are).
+
     Returns a DataFrame sorted by predicted_return descending, with:
       - 'signal': the per-ticker BUY/SELL/HOLD/LOW_CONFIDENCE/INSUF_DATA label —
         informational, based on the legacy absolute BUY_THRESHOLD/MIN_R2 cutoffs.
@@ -26,7 +34,9 @@ def generate_signals(prices_df: pd.DataFrame, returns: pd.DataFrame,
 
     print(f"\nGenerating prediction signals ({total} tickers)...")
     for i, ticker in enumerate(returns.columns, 1):
-        pred_ret, r2, top_preds, corr_signs, _, _ = predict_price(ticker, returns, corr_matrix)
+        pred_ret, r2, top_preds, corr_signs, _, _ = predict_price(
+            ticker, returns, corr_matrix, prices=prices_df, volume=volume_df, vix=vix
+        )
 
         if pred_ret is None:
             signal = 'INSUF_DATA'

@@ -78,6 +78,16 @@ TOP_N_POSITIONS       = 15       # Live trading selection: rank all tickers with
                                   # and the README's Signal Selection / Auditing sections.
 FALLBACK_PORTFOLIO    = 1_000.0  # Used when IB does not return NetLiquidation
 
+# Engineered model features (analysis/model.py) — added October 2026 after research into
+# proven return-predictability signals (momentum, liquidity, volatility) the correlation-only
+# feature set didn't capture. All optional: predict_price() falls back to pure correlation
+# features when prices/volume/vix aren't passed in, so existing call sites are unaffected.
+MOMENTUM_LOOKBACK_DAYS = 60   # Trailing-return window for the target ticker's own momentum.
+                              # Shorter than the classic 252-day equity-factor convention,
+                              # scaled to fit this bot's shorter history/rebalance cadence.
+MOMENTUM_SKIP_DAYS     = 5    # Skip the most recent N days (short-term reversal filter)
+FEATURE_VOL_WINDOW     = 20   # Rolling window for Amihud illiquidity / realized volatility
+
 # Risk management
 STOP_LOSS_PCT      = 0.08   # Close a position if it falls X% below its entry price
 TRAILING_STOP_PCT  = 0.05   # Close a position if it falls X% below its peak price since entry

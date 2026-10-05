@@ -299,7 +299,16 @@ The target label is the **cumulative return** of the target stock over the next 
 y[i] = sum(daily_returns[i : i + 7])   # ≈ 7-day total return
 ```
 
-Features are the contemporaneous daily returns of all predictor stocks. No explicit technical indicators (RSI, MACD, etc.) are computed — the model learns patterns from the cross-sectional return structure alone.
+The base feature set is the contemporaneous daily returns of all correlated predictor stocks (the cross-sectional structure). As of October 2026, four additional engineered features are appended when `prices`/`volume`/`vix` are passed to `predict_price()` (see `_engineered_features()`), added after research into the return-predictability literature identified momentum, liquidity, and volatility as signals the correlation-only design didn't capture:
+
+| Feature | Construction | Source |
+|---|---|---|
+| `momentum` | Trailing `MOMENTUM_LOOKBACK_DAYS` (60) return, skipping the most recent `MOMENTUM_SKIP_DAYS` (5) days | Target's own price history (already cached) |
+| `realized_vol` | Rolling `FEATURE_VOL_WINDOW` (20) day std of daily returns, annualized | Target's own price history (already cached) |
+| `illiquidity` | Amihud ratio — rolling mean of `\|return\| / dollar_volume` | Target's own price + volume history (already cached) |
+| `vix_level` | CBOE VIX close, forward-filled | `broker/data.py`'s `fetch_vix_cached()` — same yfinance provider, new `cache/vix_cache.parquet` |
+
+All four are **optional and additive**: a source not passed (e.g. `vix=None`) simply omits that column rather than crashing or forcing the model to use a placeholder — see the no-lookahead and missing-source handling in `analysis/model.py`'s `_engineered_features()`. No explicit technical indicators (RSI, MACD, etc.) are computed beyond these four.
 
 ---
 
@@ -314,7 +323,8 @@ V3/
 ├── broker/
 │   ├── __init__.py
 │   ├── connection.py       # connect_ib(), get_contract(), nest_asyncio fix
-│   ├── data.py             # fetch_prices() via IB; fetch_prices_free() via yfinance
+│   ├── data.py             # fetch_prices() via IB; fetch_prices_free() via yfinance;
+│   │                       # fetch_vix_cached() — market-wide volatility feature
 │   ├── orders.py           # execute_order(), close_position(), calculate_position_size()
 │   └── risk.py             # stop-loss / trailing-stop / max-drawdown guard,
 │                           # persisted to cache/risk_state.json
@@ -327,8 +337,9 @@ V3/
 │   │                       # get_top_inverse_pairs()
 │   ├── fundamentals.py     # fetch_fundamentals(), score_fundamentals(),
 │   │                       # save_fundamentals_csv() — 10-metric scoring → likelihood_pct
-│   ├── model.py            # predict_price() — RandomForestRegressor + TimeSeriesSplit;
-│   │                       # returns corr_signs, y_actual, y_predicted
+│   ├── model.py            # predict_price() — RandomForestRegressor + TimeSeriesSplit,
+│   │                       # + optional momentum/illiquidity/realized_vol/vix_level
+│   │                       # engineered features; returns corr_signs, y_actual, y_predicted
 │   ├── signals.py          # generate_signals() — BUY/SELL/HOLD with
 │   │                       # direct_top5_predictors / inverse_top5_predictors
 │   ├── backtest.py         # run_backtest() — walk-forward, no-lookahead replay with
@@ -347,6 +358,7 @@ V3/
 │   ├── prices_cache.parquet
 │   ├── volume_cache.parquet
 │   ├── market_caps_cache.json
+│   ├── vix_cache.parquet   # CBOE VIX history, written by broker/data.py's fetch_vix_cached()
 │   ├── risk_state.json     # entry/peak prices + equity peak, written by broker/risk.py
 │   └── backtest_latest/    # written by `python main.py backtest` — read by the dashboard
 │       ├── equity_curve.csv
@@ -408,6 +420,9 @@ V3/
 | `SIM_WEEKLY_AMOUNT_EUR` | `100.0` | Default weekly contribution in the DCA Simulator tab |
 | `SIM_YEARS` | `2` | Default lookback window in the DCA Simulator tab |
 | `SIM_BENCHMARK_TICKER` | `SPY` | ETF used as the S&P 500 proxy in the DCA Simulator |
+| `MOMENTUM_LOOKBACK_DAYS` | `60` | Trailing-return window for the `momentum` model feature |
+| `MOMENTUM_SKIP_DAYS` | `5` | Most-recent days excluded from momentum (short-term reversal filter) |
+| `FEATURE_VOL_WINDOW` | `20` | Rolling window for the `illiquidity` / `realized_vol` model features |
 
 ---
 

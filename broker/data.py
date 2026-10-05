@@ -257,3 +257,17 @@ def fetch_volume_cached(tickers: list) -> pd.DataFrame:
     return _update_ohlcv_cache(
         CACHE_DIR / 'volume_cache.parquet', tickers, 'Volume', fetch_volume_max
     )
+
+
+def fetch_vix_cached() -> pd.Series:
+    """Cached CBOE VIX close price — reuses the same incremental-cache machinery as
+    fetch_prices_cached(), kept in its own file (not mixed into prices_cache.parquet)
+    since VIX is a volatility index, not a tradable S&P 500 constituent, and
+    shouldn't appear as a candidate in the universe's correlation matrix.
+
+    Feeds analysis/model.py's engineered features as a market-wide volatility-
+    regime signal.
+    """
+    print("\nLoading VIX from cache + incremental update...")
+    df = _update_ohlcv_cache(CACHE_DIR / 'vix_cache.parquet', ['^VIX'], 'Close', fetch_prices_max)
+    return df['^VIX'] if '^VIX' in df.columns else pd.Series(dtype=float)
