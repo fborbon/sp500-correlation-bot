@@ -2,10 +2,15 @@ services:
   dashboard:
     build: .
     restart: always
-    mem_limit: 900m   # caps the blast radius on the shared host — if this container
-                      # leaks memory again, the kernel/docker kill it alone (restart:
+    mem_limit: 1800m  # caps the blast radius on the shared host — if this container
+                      # leaks memory again, the kernel/docker kills it alone (restart:
                       # always brings it back) instead of risking an OOM kill on one
-                      # of the other live services sharing this EC2 instance
+                      # of the other live services sharing this EC2 instance.
+                      # Was 900m, which OOM-killed a legitimate full-502-ticker paper
+                      # run mid-way (observed peak ~760MB anon-rss, cutting it close
+                      # with the ~50-100MB Streamlit baseline sharing the same cgroup)
+                      # -- the weekly cron exec's into this same container, so the cap
+                      # has to accommodate a full production run, not just serving.
     ports:
       - "127.0.0.1:8501:8501"   # only exposed to Nginx, not public
     volumes:
