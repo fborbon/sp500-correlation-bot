@@ -37,8 +37,12 @@ echo "=== [5/7] Start dashboard ==="
 docker compose up -d
 
 echo "=== [6/7] Configure Nginx ==="
-sudo cp "$APP_DIR/nginx/forwardforecasting.conf" /etc/nginx/sites-available/forwardforecasting.conf
-sudo ln -sf /etc/nginx/sites-available/forwardforecasting.conf /etc/nginx/sites-enabled/
+# The main-site config (central login portal, protected locations) is installed by
+# scripts/install_nginx.sh from CI with a drift guard. Fresh host only: link it once.
+if [ ! -e /etc/nginx/sites-available/forwardforecasting.conf ]; then
+  sudo install -m 644 "$APP_DIR/nginx/forwardforecasting.conf" /etc/nginx/sites-available/forwardforecasting.conf
+fi
+sudo ln -sf /etc/nginx/sites-available/forwardforecasting.conf /etc/nginx/sites-enabled/forwardforecasting.conf
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 

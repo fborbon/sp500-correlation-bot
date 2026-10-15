@@ -30,10 +30,11 @@ jobs:
               git remote add origin https://github.com/fborbon/sp500-correlation-bot.git
             fi
             cd /opt/forwardforecasting
+            OLD_REV=$(git rev-parse HEAD)
             git fetch origin main
             git reset --hard origin/main
             docker compose up -d --build
             docker compose ps
-            sudo cp nginx/forwardforecasting.conf /etc/nginx/sites-available/forwardforecasting.conf
-            sudo nginx -t && sudo nginx -s reload
+            # Main-site nginx config (incl. central login): drift-guarded install, see the script
+            bash scripts/install_nginx.sh "$OLD_REV"
             echo "✓ SP500 bot deployed at $(date -u)"
