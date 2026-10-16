@@ -1,6 +1,7 @@
 services:
   dashboard:
     build: .
+    container_name: sp500_correlation_bot   # explicit name; the default was the unhelpful forwardforecasting-dashboard-1
     restart: always
     mem_limit: 1800m  # caps the blast radius on the shared host — if this container
                       # leaks memory again, the kernel/docker kills it alone (restart:
