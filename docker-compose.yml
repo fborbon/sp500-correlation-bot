@@ -19,6 +19,9 @@ services:
       - ./outputs:/app/outputs   # persist run outputs
     environment:
       - TZ=UTC
+      # fewer glibc malloc arenas: Streamlit runs many threads, and each one otherwise keeps its own
+      # arena of freed-but-not-returned memory, which inflates the resident size of a long-running process
+      - MALLOC_ARENA_MAX=2
     command: >
       streamlit run dashboard.py
       --server.address=0.0.0.0
@@ -26,3 +29,4 @@ services:
       --server.headless=true
       --server.baseUrlPath=SP500bot
       --browser.gatherUsageStats=false
+      --server.fileWatcherType=none

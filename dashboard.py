@@ -152,7 +152,7 @@ def _render_cached(run_dir, name: str, height: int) -> bool:
     return False
 
 
-@st.cache_data(ttl=86400, max_entries=8)
+@st.cache_data(ttl=21600, max_entries=6)
 def _read_csv_cached(path: str, mtime: float, **kwargs):
     # `mtime` deliberately has no leading underscore: Streamlit excludes
     # underscore-prefixed params from the cache key (meant for unhashable
@@ -884,7 +884,7 @@ with tab_sim:
                                   value=float(SIM_WEEKLY_AMOUNT_EUR), step=10.0)
     sim_years = sc2.slider('Years', min_value=1, max_value=10, value=int(SIM_YEARS))
 
-    @st.cache_data(ttl=3600, show_spinner='Fetching S&P 500 + EUR/USD history…')
+    @st.cache_data(ttl=3600, max_entries=4, show_spinner='Fetching S&P 500 + EUR/USD history…')  # one entry per amount/years combination: bound it
     def _run_dca_simulation(ticker: str, weekly_amount: float, years: int):
         from analysis.simulator import simulate_weekly_dca
         result = simulate_weekly_dca(ticker=ticker, weekly_amount_eur=weekly_amount, years=years)
